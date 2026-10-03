@@ -24,3 +24,9 @@ dist-ssr
 *.sw?
 .vite-source-tags.js
 .vercel
+
+# Segredos — nunca versionar
+.env
+.env.*
+!.env.example
+vercel.json
