@@ -1,23 +1,18 @@
 -- ============================================================================
---  MULTI-TENANCY: uma base compartilhada entre clínicas
+--  MULTI-TENANCY — migração de bancos JÁ EXISTENTES
 --
---  IMPORTANTE
---  Este script é ADITIVO e NÃO destrutivo: cria colunas, não apaga nada.
---  Em caso de dúvida, faça dump antes: mysqldump -u USER -p NOME > backup.sql
+--  Seguro para rodar no phpMyAdmin: não usa DELIMITER nem stored procedure.
+--  Aditivo e idempotente: cria o que falta, nunca apaga dados.
 --
---  Ele:
---   1. cria a tabela `clinicas` e a `auditoria`;
---   2. adiciona `clinica_id` nas tabelas de negócio;
---   3. cria a clínica padrão nº 1 e passa todos os dados existentes para ela;
---   4. torna a FK ativa (MySQL exige colunas NOT NULL para chaves estrangeiras).
+--  Antes de rodar, faça backup:
+--    mysqldump -u USUARIO -p NOME_DO_BANCO > backup.sql
 --
---  Funciona em MySQL 5.7+ / 8.x e MariaDB.
+--  Instalação NOVA? Não precisa deste arquivo: use só server/schema.sql,
+--  que já vem com clinicas e clinica_id.
 -- ============================================================================
 
-SET @HOJE := NOW();
-
 -- ---------------------------------------------------------------------------
--- 1. Tabela de clínicas
+-- 1. Clínicas
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS clinicas (
   id INT PRIMARY KEY AUTO_INCREMENT,
@@ -26,13 +21,13 @@ CREATE TABLE IF NOT EXISTS clinicas (
   cnpj VARCHAR(20) NULL,
   telefone VARCHAR(50) NULL,
   email VARCHAR(255) NULL,
-  plano VARCHAR(40) DEFAULT 'starter',
+  plano VARCHAR(40) DEFAULT 'essencial',
   ativo BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-INSERT INTO clinicas (id, nome, slug, cnpj, email, plano, ativo)
-VALUES (1, 'Clínica Principal', 'clinica-principal', NULL, NULL, 'starter', TRUE)
+INSERT INTO clinicas (id, nome, slug, plano, ativo)
+VALUES (1, 'Clínica Principal', 'clinica-principal', 'essencial', TRUE)
 ON DUPLICATE KEY UPDATE nome = VALUES(nome);
 
 -- ---------------------------------------------------------------------------
@@ -54,75 +49,10 @@ CREATE TABLE IF NOT EXISTS auditoria (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------------------------------------------------------------------
--- 3. clinic_id (aditivo: cada tabela recebe a coluna se ainda não tiver)
+-- 3. Recuperação de senha
+--    Guarda apenas o SHA-256 do token: se o banco vazar, os tokens não são
+--    recuperáveis por quem leu a tabela.
 -- ---------------------------------------------------------------------------
-
--- perfis NÃO recebe clinica_id: é um catálogo global de cargos.
-
-SET @tabelas := 'usuarios,pacientes,dentistas,procedimentos,consultas,consulta_procedimentos,tratamentos,tratamento_procedimentos,orcamentos,orcamento_itens,pagamentos,despesas,odontograma';
-
--- O MySQL não aceita DDL dinâmico direto. Uma stored procedure percorre as
--- tabelas e só executa o ALTER onde a coluna ainda não existe.
-DROP PROCEDURE IF EXISTS _add_clinica_id;
-DELIMITER $$
-CREATE PROCEDURE _add_clinica_id()
-BEGIN
-  DECLARE done INT DEFAULT 0;
-  DECLARE t VARCHAR(64);
-  DECLARE cur CURSOR FOR
-    SELECT 'usuarios' UNION SELECT 'pacientes' UNION SELECT 'dentistas'
-    UNION SELECT 'procedimentos' UNION SELECT 'consultas'
-    UNION SELECT 'consulta_procedimentos' UNION SELECT 'tratamentos'
-    UNION SELECT 'tratamento_procedimentos' UNION SELECT 'orcamentos'
-    UNION SELECT 'orcamento_itens' UNION SELECT 'pagamentos'
-    UNION SELECT 'despesas' UNION SELECT 'odontograma';
-  DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
-
-  OPEN cur;
-  read_loop: LOOP
-    FETCH cur INTO t;
-    IF done = 1 THEN LEAVE read_loop; END IF;
-
-    SET @existe := (SELECT COUNT(*) FROM information_schema.COLUMNS
-                    WHERE TABLE_SCHEMA = DATABASE()
-                      AND TABLE_NAME = t AND COLUMN_NAME = 'clinica_id');
-
-    IF @existe = 0 THEN
-      SET @s := CONCAT('ALTER TABLE `', t, '` ADD COLUMN clinica_id INT NULL');
-      PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
-    END IF;
-  END LOOP;
-  CLOSE cur;
-END$$
-DELIMITER ;
-CALL _add_clinica_id();
-DROP PROCEDURE IF EXISTS _add_clinica_id;
-
--- ---------------------------------------------------------------------------
--- 4. Backfill: tudo que existe vai para a clínica 1
--- ---------------------------------------------------------------------------
-UPDATE usuarios             SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE pacientes            SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE dentistas            SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE procedimentos        SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE consultas            SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE consulta_procedimentos SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE tratamentos           SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE tratamento_procedimentos SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE orcamentos            SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE orcamento_itens       SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE pagamentos            SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE despesas              SET clinica_id = 1 WHERE clinica_id IS NULL;
-UPDATE odontograma           SET clinica_id = 1 WHERE clinica_id IS NULL;
-
--- ---------------------------------------------------------------------------
--- 5. NOT NULL + chaves estrangeiras
--- ---------------------------------------------------------------------------
--- ---------------------------------------------------------------------------
--- 6. Recuperação de senha
--- ---------------------------------------------------------------------------
--- Guarda apenas o SHA-256 do token: se o banco vazar, os tokens não são
--- recuperáveis por quem leu a tabela.
 CREATE TABLE IF NOT EXISTS tokens_recuperacao (
   id INT PRIMARY KEY AUTO_INCREMENT,
   usuario_id CHAR(36) NOT NULL,
@@ -137,89 +67,129 @@ CREATE TABLE IF NOT EXISTS tokens_recuperacao (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------------------------------------------------------------------
-ALTER TABLE pacientes       MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE dentistas       MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE procedimentos   MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE consultas       MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE consulta_procedimentos MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE tratamentos      MODIFY clinica_id INT NOT NULL DEFAULT 1;
+-- 4. clinica_id em cada tabela de negócio
+--    Cada bloco só executa o ALTER se a coluna ainda não existir.
+--    'perfis' NÃO entra: é um catálogo global de cargos.
+-- ---------------------------------------------------------------------------
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='usuarios' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE usuarios ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='pacientes' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE pacientes ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='dentistas' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE dentistas ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='procedimentos' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE procedimentos ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='consultas' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE consultas ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='consulta_procedimentos' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE consulta_procedimentos ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='tratamentos' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE tratamentos ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='tratamento_procedimentos' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE tratamento_procedimentos ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='orcamentos' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE orcamentos ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='orcamento_itens' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE orcamento_itens ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='pagamentos' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE pagamentos ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='despesas' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE despesas ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='odontograma' AND COLUMN_NAME='clinica_id');
+SET @s := IF(@c = 0, 'ALTER TABLE odontograma ADD COLUMN clinica_id INT NULL', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+-- token_version: invalida tokens antigos (logout, redefinição de senha)
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='usuarios' AND COLUMN_NAME='token_version');
+SET @s := IF(@c = 0, 'ALTER TABLE usuarios ADD COLUMN token_version INT NOT NULL DEFAULT 0', 'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
+-- ---------------------------------------------------------------------------
+-- 5. Backfill: tudo que já existe pertence à clínica 1
+-- ---------------------------------------------------------------------------
+UPDATE usuarios                SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE pacientes               SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE dentistas               SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE procedimentos           SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE consultas               SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE consulta_procedimentos  SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE tratamentos             SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE tratamento_procedimentos SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE orcamentos              SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE orcamento_itens         SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE pagamentos              SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE despesas                SET clinica_id = 1 WHERE clinica_id IS NULL;
+UPDATE odontograma             SET clinica_id = 1 WHERE clinica_id IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 6. NOT NULL + chaves estrangeiras
+--    O MySQL exige NOT NULL em colunas de FK.
+-- ---------------------------------------------------------------------------
+ALTER TABLE usuarios                MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE pacientes               MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE dentistas               MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE procedimentos           MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE consultas               MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE consulta_procedimentos  MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE tratamentos             MODIFY clinica_id INT NOT NULL DEFAULT 1;
 ALTER TABLE tratamento_procedimentos MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE orcamentos      MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE orcamento_itens MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE pagamentos      MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE despesas        MODIFY clinica_id INT NOT NULL DEFAULT 1;
-ALTER TABLE odontograma     MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE orcamentos              MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE orcamento_itens         MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE pagamentos              MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE despesas                MODIFY clinica_id INT NOT NULL DEFAULT 1;
+ALTER TABLE odontograma             MODIFY clinica_id INT NOT NULL DEFAULT 1;
 
--- FKs (o nome precisa ser único no schema; MySQL não aceita IF NOT EXISTS)
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios'
-              AND CONSTRAINT_NAME = 'fk_usuarios_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE usuarios ADD CONSTRAINT fk_usuarios_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='usuarios' AND CONSTRAINT_NAME='fk_usuarios_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE usuarios ADD CONSTRAINT fk_usuarios_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'pacientes'
-              AND CONSTRAINT_NAME = 'fk_pacientes_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE pacientes ADD CONSTRAINT fk_pacientes_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='pacientes' AND CONSTRAINT_NAME='fk_pacientes_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE pacientes ADD CONSTRAINT fk_pacientes_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'dentistas'
-              AND CONSTRAINT_NAME = 'fk_dentistas_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE dentistas ADD CONSTRAINT fk_dentistas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='dentistas' AND CONSTRAINT_NAME='fk_dentistas_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE dentistas ADD CONSTRAINT fk_dentistas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'consultas'
-              AND CONSTRAINT_NAME = 'fk_consultas_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE consultas ADD CONSTRAINT fk_consultas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='consultas' AND CONSTRAINT_NAME='fk_consultas_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE consultas ADD CONSTRAINT fk_consultas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'orcamentos'
-              AND CONSTRAINT_NAME = 'fk_orcamentos_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE orcamentos ADD CONSTRAINT fk_orcamentos_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='orcamentos' AND CONSTRAINT_NAME='fk_orcamentos_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE orcamentos ADD CONSTRAINT fk_orcamentos_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'pagamentos'
-              AND CONSTRAINT_NAME = 'fk_pagamentos_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE pagamentos ADD CONSTRAINT fk_pagamentos_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='pagamentos' AND CONSTRAINT_NAME='fk_pagamentos_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE pagamentos ADD CONSTRAINT fk_pagamentos_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
-SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'despesas'
-              AND CONSTRAINT_NAME = 'fk_despesas_clinica');
-SET @s := IF(@fk = 0,
-  'ALTER TABLE despesas ADD CONSTRAINT fk_despesas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)',
-  'SELECT 1');
-PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
-
--- ---------------------------------------------------------------------------
--- 7. Revogação de sessão (token_version)
--- ---------------------------------------------------------------------------
--- Incrementar token_version invalida todos os tokens emitidos antes: é o que
--- faz o logout, o "sair de todos os dispositivos" e a redefinição de senha
--- derrubarem sessões já abertas.
-SET @tem_tv := (SELECT COUNT(*) FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'token_version');
-
-SET @s := IF(@tem_tv = 0,
-  'ALTER TABLE usuarios ADD COLUMN token_version INT NOT NULL DEFAULT 0',
-  'SELECT 1');
+SET @fk := (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='despesas' AND CONSTRAINT_NAME='fk_despesas_clinica');
+SET @s := IF(@fk = 0, 'ALTER TABLE despesas ADD CONSTRAINT fk_despesas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)', 'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
 SELECT 'multi-tenancy aplicada' AS ok, COUNT(*) AS clinicas FROM clinicas;
