@@ -61,8 +61,9 @@ export default function Home() {
       .catch(() => setPlanos([]));
   }, []);
 
-  // Quem já entrou vai direto para o painel; a landing é para fora.
-  if (!loading && user) return <Navigate to="/" replace />;
+  // Quem já entrou vai direto para o painel. Precisa ser /dashboard: se fosse
+// "/", a Home redirecionaria para si mesma, em laço infinito.
+  if (!loading && user) return <Navigate to="/dashboard" replace />;
 
   const lista = planos.length ? planos : [
     { slug: 'essencial', nome: 'Essencial', max_dentistas: 1, max_usuarios: 3, preco_mensal: 149, recursos: [] },

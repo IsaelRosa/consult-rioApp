@@ -22,7 +22,8 @@ export default function ProtectedRoute({
   }
 
   if (!user) return <Navigate to="/login" replace />;
-  if (permissao && !pode(perfil, permissao)) return <Navigate to="/" replace />;
+  // Sem permissão vai para o dashboard, não para "/" (que é a landing pública).
+  if (permissao && !pode(perfil, permissao)) return <Navigate to="/dashboard" replace />;
 
   return <>{children}</>;
 }

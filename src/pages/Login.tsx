@@ -19,7 +19,7 @@ export default function Login() {
     const { error } = await signIn(email, password);
     setLoading(false);
     if (error) setError(error.message);
-    else navigate('/');
+    else navigate('/dashboard');
   };
 
   return (

@@ -25,13 +25,16 @@ function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/inicio" element={<Home />} />
           <Route path="/login" element={<Login />} />
           <Route path="/cadastro" element={<Cadastro />} />
           <Route path="/recuperar-senha" element={<RecuperarSenha />} />
           <Route path="/redefinir-senha" element={<RecuperarSenha />} />
+          {/* Fora do grupo protegido de propósito: quem não tem sessão precisa
+              ver a landing, não ser jogado direto no login. A Home decide:
+              logado vai ao painel, anônimo fica na landing. */}
+          <Route path="/" element={<Home />} />
+          <Route path="/inicio" element={<Home />} />
           <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-            <Route path="/" element={<Home />} />
             <Route path="/planos" element={<ProtectedRoute permissao="usuarios"><Planos /></ProtectedRoute>} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/pacientes" element={<ProtectedRoute permissao="pacientes"><Pacientes /></ProtectedRoute>} />
