@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { query, testConnection } from './db.js';
 import { registerCrud } from './crud.js';
-import { gerarHashSenha, verificarSenha, gerarToken, exigirToken } from './auth.js';
+import { gerarHashSenha, verificarSenha, precisaRehash, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
   dashboardData,
@@ -252,6 +252,18 @@ app.get('/api/dashboard', async (_req, res) => {
       }
     };
 
+    // Para GROUP BY: devolve todas as linhas. Usar `seguro` aqui truncava a
+    // lista na primeira linha e quebrava o gráfico com TypeError.
+    const seguroLista = async (sql, params) => {
+      try {
+        const linhas = await query(sql, params);
+        return Array.isArray(linhas) ? linhas : [];
+      } catch (error) {
+        console.warn('[api:dashboard]', error.message);
+        return [];
+      }
+    };
+
     const INICIO_MES = "DATE_FORMAT(CURDATE(), '%Y-%m-01')";
     const FIM_MES = 'LAST_DAY(CURDATE())';
 
@@ -291,13 +303,12 @@ app.get('/api/dashboard', async (_req, res) => {
       { total: 0 },
     );
 
-    const status = await seguro(
+    const status = await seguroLista(
       'SELECT status, COUNT(*) AS total FROM consultas GROUP BY status',
-      [],
       [],
     );
 
-    const meses = await seguro(
+    const meses = await seguroLista(
       `SELECT
          DATE_FORMAT(data_pagamento, '%Y-%m') AS mes,
          COALESCE(SUM(valor), 0) AS receitas
@@ -306,10 +317,9 @@ app.get('/api/dashboard', async (_req, res) => {
          AND data_pagamento >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
        GROUP BY mes`,
       [],
-      [],
     );
 
-    const despesasPorMes = await seguro(
+    const despesasPorMes = await seguroLista(
       `SELECT
          DATE_FORMAT(data_despesa, '%Y-%m') AS mes,
          COALESCE(SUM(valor), 0) AS despesas
@@ -318,16 +328,14 @@ app.get('/api/dashboard', async (_req, res) => {
          AND data_despesa >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
        GROUP BY mes`,
       [],
-      [],
     );
 
-    const proximas = await seguro(
+    const proximas = await seguroLista(
       `${SELECT_CONSULTAS}
        WHERE c.data_hora_inicio >= NOW()
          AND c.status NOT IN ('cancelado', 'concluido')
        ORDER BY c.data_hora_inicio ASC
        LIMIT 5`,
-      [],
       [],
     );
 
@@ -439,6 +447,55 @@ app.get('/api/despesas', async (_req, res) => {
   }
   return res.json(demoDespesas);
 });
+
+// Traduz erros do mysql2 em mensagens que dizem o que fazer, em vez de um
+// 500 genérico que não ajuda ninguém a descobrir a causa.
+const erroDeBanco = (error) => {
+  const codigo = error?.code || '';
+  const sqlState = error?.sqlState || '';
+
+  if (codigo === 'ER_NO_SUCH_TABLE' || sqlState === '42S02') {
+    return { status: 500, error: `Tabela não encontrada no banco. Rode server/schema.sql. (${error.sqlMessage || codigo})` };
+  }
+  if (codigo === 'ER_BAD_FIELD_ERROR' || sqlState === '42S22') {
+    return { status: 500, error: `Coluna ausente no banco. Rode server/migrate.sql. (${error.sqlMessage || codigo})` };
+  }
+  if (codigo === 'ER_ACCESS_DENIED_ERROR') {
+    return { status: 500, error: 'Credenciais do banco inválidas (DB_USER / DB_PASSWORD).' };
+  }
+  if (codigo === 'ER_NO_DB_ERROR' || /Unknown database/i.test(error?.message || '')) {
+    return { status: 500, error: 'Banco de dados inexistente (DB_NAME).' };
+  }
+  if (codigo === 'ECONNREFUSED' || codigo === 'PROTOCOL_CONNECTION_LOST') {
+    return { status: 500, error: 'Conexão com o banco recusada. Confira DB_HOST e DB_PORT.' };
+  }
+
+  return { status: 500, error: `Falha ao consultar o banco: ${error?.sqlMessage || error?.message || 'erro desconhecido'}` };
+};
+
+const loginComBanco = async (email, senha) => {
+  const rows = await query(
+    `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash,
+            p.nome AS perfil_nome, p.slug AS perfil_slug
+     FROM usuarios u
+     LEFT JOIN perfis p ON p.id = u.perfil_id
+     WHERE u.email = ? LIMIT 1`,
+    [email],
+  );
+
+  const linha = rows[0];
+  if (!linha || !linha.ativo || !verificarSenha(senha, linha.password_hash)) {
+    return { erro: { status: 401, error: 'E-mail ou senha inválidos.' } };
+  }
+
+  // Senha veio do seed em texto puro: re-hasheia agora (upgrade gradual).
+  if (precisaRehash(linha.password_hash)) {
+    await query('UPDATE usuarios SET password_hash = ? WHERE id = ?', [gerarHashSenha(senha), linha.id]);
+    console.log(`[auth] senha de ${email} migrada para scrypt`);
+  }
+
+  return { user: moldarUsuario(linha), token: gerarToken(linha) };
+};
 
 // ---------- Usuários ----------
 // Fora do CRUD genérico: a senha precisa ser hasheada e o id é um UUID.
@@ -568,32 +625,13 @@ app.post('/api/usuarios/login', async (req, res) => {
 
   if (mysqlReady) {
     try {
-      const rows = await query(
-        `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash,
-                p.nome AS perfil_nome, p.slug AS perfil_slug
-         FROM usuarios u
-         LEFT JOIN perfis p ON p.id = u.perfil_id
-         WHERE u.email = ? LIMIT 1`,
-        [email],
-      );
-
-      const linha = rows[0];
-
-      if (!linha || !linha.ativo || !verificarSenha(senha, linha.password_hash)) {
-        return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
-      }
-
-      // Senha veio do seed em texto puro: re-hasheia agora (upgrade gradual).
-      if (precisaRehash(linha.password_hash)) {
-        const novoHash = gerarHashSenha(senha);
-        await query('UPDATE usuarios SET password_hash = ? WHERE id = ?', [novoHash, linha.id]);
-        console.log(`[auth] senha do usuário ${email} migrada para scrypt`);
-      }
-
-      return res.json({ user: moldarUsuario(linha), token: gerarToken(linha) });
+      const { user, token, erro } = await loginComBanco(email, senha);
+      if (erro) return res.status(erro.status).json({ error: erro.error });
+      return res.json({ user, token });
     } catch (error) {
-      console.warn('[auth:login]', error.message);
-      return res.status(500).json({ error: 'Falha ao autenticar.' });
+      console.warn('[auth:login]', error?.code || '', error?.message);
+      const mapeado = erroDeBanco(error);
+      return res.status(mapeado.status).json({ error: mapeado.error });
     }
   }
 

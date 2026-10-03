@@ -64,7 +64,8 @@ export const verificarSenha = (senha, armazenado) => {
   }
 };
 
-const precisaRehash = (armazenado) => !String(armazenado || '').startsWith('scrypt$');
+// Indica se a senha está em texto puro e deve ser migrada para scrypt.
+export const precisaRehash = (armazenado) => !String(armazenado || '').startsWith('scrypt$');
 
 // ---------- Token de sessão (HMAC) ----------
 

@@ -191,3 +191,10 @@ VALUES
   ('demo-dentista', 'demo-dentista', 'dentista@odonto.com', 'Dentista', 3, '123456', TRUE),
   ('demo-financeiro', 'demo-financeiro', 'financeiro@odonto.com', 'Financeiro', 4, '123456', TRUE)
 ON DUPLICATE KEY UPDATE nome = VALUES(nome), perfil_id = VALUES(perfil_id), password_hash = VALUES(password_hash), ativo = VALUES(ativo);
+
+-- Dentistas são exigidos pelas chaves estrangeiras de consultas e orçamentos.
+INSERT INTO dentistas (id, nome, cro, especialidade, telefone, email, cor_agenda, ativo) VALUES
+  (1, 'Dr. Carlos Mendes', 'SP-12345', 'Ortodontia', '(11) 97777-3333', 'carlos@clinica.com', '#3B82F6', TRUE),
+  (2, 'Dra. Patrícia Rocha', 'SP-23456', 'Clínica geral', '(11) 96666-4444', 'patricia@clinica.com', '#10B981', TRUE),
+  (3, 'Dr. Bruno Lima', 'SP-34567', 'Endodontia', '(11) 95555-5555', 'bruno@clinica.com', '#F59E0B', TRUE)
+ON DUPLICATE KEY UPDATE nome = VALUES(nome), cro = VALUES(cro), especialidade = VALUES(especialidade), ativo = VALUES(ativo);

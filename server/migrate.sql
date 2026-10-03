@@ -4,10 +4,22 @@
 
 -- A coluna `ativo` é usada pelo dashboard (pacientes ativos) e pela API,
 -- mas não existia na tabela original.
--- Requer MariaDB 10.2+ ou MySQL 8.0.29+. Em versões antigas, rode o
--- ALTER sem a cláusula IF NOT EXISTS (ou verifique antes com SHOW COLUMNS).
-ALTER TABLE pacientes
-  ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT TRUE;
+--
+-- `ADD COLUMN IF NOT EXISTS` existe no MariaDB, mas NÃO no MySQL (testado no
+-- 8.4: erro 1064). A forma abaixo funciona nos dois: consulta o
+-- information_schema e só executa o ALTER se a coluna ainda não existir.
+SET @coluna_ativa := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pacientes' AND COLUMN_NAME = 'ativo'
+);
+
+SET @sql := IF(@coluna_ativa = 0,
+  'ALTER TABLE pacientes ADD COLUMN ativo BOOLEAN DEFAULT TRUE',
+  'SELECT ''coluna pacientes.ativo ja existe'' AS aviso');
+
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- Catálogo de procedimentos. Sem isso o dropdown de procedimentos fica
 -- vazio em produção (o modo demo usa o seed em memória).
@@ -40,3 +52,10 @@ INSERT IGNORE INTO procedimentos (id, nome, codigo, categoria, valor_padrao, tem
   (26, 'Contorno adicionado em resina',     'CAR',  'Estética',        380,  60,  TRUE),
   (27, 'Consulta de avaliação',             'AVS',  'Consulta',          0,  20,  TRUE),
   (28, 'Radiografia panorâmica',            'RXS',  'Diagnóstico',     140,  15,  TRUE);
+
+-- Dentistas: consultas e orçamentos têm chave estrangeira para dentistas,
+-- então sem eles nenhum agendamento pode ser salvo.
+INSERT IGNORE INTO dentistas (id, nome, cro, especialidade, telefone, email, cor_agenda, ativo) VALUES
+  (1, 'Dr. Carlos Mendes',     'SP-12345', 'Ortodontia',    '(11) 97777-3333', 'carlos@clinica.com',   '#3B82F6', TRUE),
+  (2, 'Dra. Patrícia Rocha',  'SP-23456', 'Clínica geral', '(11) 96666-4444', 'patricia@clinica.com', '#10B981', TRUE),
+  (3, 'Dr. Bruno Lima',        'SP-34567', 'Endodontia',    '(11) 95555-5555', 'bruno@clinica.com',    '#F59E0B', TRUE);
