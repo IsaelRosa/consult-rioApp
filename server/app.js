@@ -31,7 +31,23 @@ export const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
-export const mysqlReady = await testConnection();
+// A sonda do MySQL NÃO segura o boot. O app começa a escutar na hora e a
+// conexão é testada em segundo plano: se o banco estiver inacessível, o
+// processo continua no ar (modo demo) em vez de derrubar o proxy com 503.
+export let mysqlReady = false;
+
+const DB_PROBE_TIMEOUT_MS = 5000;
+
+export const probeDatabase = async () => {
+  const ok = await Promise.race([
+    testConnection(),
+    new Promise((resolve) => setTimeout(() => resolve(false), DB_PROBE_TIMEOUT_MS)),
+  ]).catch(() => false);
+
+  mysqlReady = ok;
+  console.log(`[boot] banco: ${mysqlReady ? 'conectado' : 'indisponível (modo demo)'}`);
+  return mysqlReady;
+};
 
 const fetchFromDb = async (sql, params = [], fallback) => {
   if (!mysqlReady) return fallback;

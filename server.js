@@ -1,4 +1,4 @@
-import { app, mysqlReady } from './server/app.js';
+import { app, probeDatabase, mysqlReady } from './server/app.js';
 
 const host = process.env.HOST || '0.0.0.0';
 
@@ -12,8 +12,13 @@ console.log(`[boot] PORT env=${JSON.stringify(process.env.PORT ?? null)} -> usan
 
 const server = app.listen(port, host, () => {
   console.log(`✅ App running on http://${host}:${port}`);
-  console.log(mysqlReady ? '📦 MySQL connected' : '🧪 Demo mode active');
+  console.log('⏳ verificando banco de dados...');
 });
+
+// O listen acontece primeiro; o banco é testado depois, sem travar o boot.
+probeDatabase()
+  .then(() => console.log(mysqlReady ? '📦 MySQL connected' : '🧪 Demo mode active'))
+  .catch((err) => console.error('[boot] falha na sonda do banco:', err));
 
 server.on('error', (err) => {
   console.error(`[boot] listen falhou em ${host}:${port} —`, err);
