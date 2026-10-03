@@ -8,6 +8,9 @@ import { query, testConnection } from './db.js';
 import { registerCrud } from './crud.js';
 import { auditarReq } from './auditoria.js';
 import { TENANT_TABLES } from './tenant.js';
+import { limite } from './ratelimit.js';
+import { registrarClinica } from './cadastro.js';
+import { verificarLimite, PLANOS, obterPlano } from './planos.js';
 import { gerarHashSenha, verificarSenha, precisaRehash, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
@@ -37,8 +40,47 @@ export const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
-// Toda a API exige sessão, exceto /api/health e o login. Antes estas rotas
-// eram abertas — qualquer pessoa com a URL podia ler e alterar dados.
+// Rotas públicas: o cadastro de clínica é a porta de entrada do SaaS e por
+// isso tem rate limit próprio. O resto exige sessão.
+app.post(
+  '/api/plataforma/registrar',
+  limite({ janelaMs: 3_600_000, max: 5, mensagem: 'Muitas tentativas de cadastro deste IP. Tente mais tarde.' }),
+  async (req, res) => {
+    if (!mysqlReady) {
+      return res.status(503).json({ error: 'Cadastro indisponível: o banco de dados não está configurado.' });
+    }
+
+    try {
+      const resultado = await registrarClinica(req.body);
+      if (resultado.erro) return res.status(resultado.erro.status).json({ error: resultado.erro.error });
+
+      console.log(`[plataforma] nova clínica #${resultado.clinica.id} — ${resultado.clinica.nome} (${resultado.plano})`);
+
+      // Devolve só o necessário para o usuário logar; nada de token aqui.
+      return res.status(201).json({
+        clinica: { nome: resultado.clinica.nome, slug: resultado.clinica.slug },
+        plano: resultado.plano,
+        admin: { email: resultado.admin.email },
+      });
+    } catch (error) {
+      console.warn('[plataforma:registrar]', error.code || '', error.message);
+      const mapeado = erroDeBanco(error);
+      return res.status(mapeado.status).json({ error: mapeado.error });
+    }
+  },
+);
+
+app.get('/api/plataforma/planos', (_req, res) => {
+  res.json(Object.values(PLANOS).map(({ slug, nome, max_dentistas, max_usuarios, preco_mensal, recursos }) => ({
+    slug,
+    nome,
+    max_dentistas,
+    max_usuarios,
+    preco_mensal,
+    recursos,
+  })));
+});
+
 app.use('/api', exigirToken);
 
 // A sonda do MySQL NÃO segura o boot. O app começa a escutar na hora e a
@@ -68,6 +110,9 @@ const fetchFromDb = async (sql, params = [], fallback) => {
     return fallback;
   }
 };
+
+// Tabelas cuja quantidade é limitada pelo plano contratado.
+const LIMITADOS_POR_PLANO = ['dentistas'];
 
 // Clínica da requisição, vem do token assinado (ver server/auth.js e tenant.js).
 const clinica = (req) => {
@@ -529,7 +574,7 @@ const erroDeBanco = (error) => {
 
 const loginComBanco = async (email, senha) => {
   const rows = await query(
-    `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash, u.clinica_id,
+    `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash, u.clinica_id, u.token_version,
             c.nome AS clinica_nome, c.slug AS clinica_slug, c.ativo AS clinica_ativa,
             p.nome AS perfil_nome, p.slug AS perfil_slug
      FROM usuarios u
@@ -562,6 +607,30 @@ const loginComBanco = async (email, senha) => {
 
 // ---------- Usuários ----------
 // Fora do CRUD genérico: a senha precisa ser hasheada e o id é um UUID.
+
+// Barreira comercial: o plano define quantos dentistas a clínica pode ter.
+// Só faz sentido com o MySQL configurado — no modo demo não há limite.
+app.post('/api/plataforma/limite/:recurso', async (req, res) => {
+  const recurso = req.params.recurso;
+  if (!['dentistas', 'usuarios'].includes(recurso)) {
+    return res.status(400).json({ error: 'Recurso inválido.' });
+  }
+
+  const cid = clinica(req);
+
+  if (!mysqlReady) return res.json({ ok: true });
+
+  try {
+    const [clinicaRow] = await query('SELECT plano FROM clinicas WHERE id = ? LIMIT 1', [cid]);
+    const resultado = await verificarLimite(clinicaRow?.plano, cid, recurso, 1);
+
+    if (!resultado.ok) return res.status(402).json({ error: resultado.mensagem, limite: resultado.limite });
+    return res.json({ ok: true, limite: resultado.limite });
+  } catch (error) {
+    console.warn('[planos:limite]', error.message);
+    return res.status(500).json({ error: 'Não foi possível verificar o limite do plano.' });
+  }
+});
 
 app.post('/api/usuarios', async (req, res) => {
   const { nome, email, senha, perfil_id } = req.body || {};
@@ -671,7 +740,7 @@ app.get('/api/odontograma', async (req, res) => {
 
 // Usuário da sessão atual, resolvido pelo token (id em `req.usuario`).
 const SELECT_USUARIOS = `
-  SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.clinica_id,
+  SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.clinica_id, u.token_version,
          c.nome AS clinica_nome, c.slug AS clinica_slug,
          p.nome AS perfil_nome, p.slug AS perfil_slug
   FROM usuarios u
@@ -682,12 +751,61 @@ const SELECT_USUARIOS = `
 const moldarUsuario = (linha) => {
   if (!linha) return null;
   const { perfil_nome, perfil_slug, password_hash, clinica_nome, clinica_slug, ...resto } = linha;
+  // token_version é interno de sessão; não faz parte do perfil do cliente.
+  delete resto.token_version;
   return {
     ...resto,
     perfil: perfil_nome ? { id: resto.perfil_id, nome: perfil_nome, slug: perfil_slug } : null,
     clinica: resto.clinica_id ? { id: resto.clinica_id, nome: clinica_nome, slug: clinica_slug } : null,
   };
 };
+
+// Revogação de sessão: incrementa token_version, invalidando todos os tokens
+// já emitidos para aquele usuário (equivale a "sair de todos os dispositivos").
+app.post('/api/usuarios/logout', async (req, res) => {
+  const id = req.usuario?.sub;
+  if (!id) return res.json({ ok: true });
+
+  if (mysqlReady) {
+    try {
+      await query('UPDATE usuarios SET token_version = token_version + 1 WHERE id = ?', [id]);
+      auditarReq(req, 'logout', 'usuarios', id);
+    } catch (error) {
+      console.warn('[auth:logout]', error.message);
+    }
+  }
+
+  return res.json({ ok: true });
+});
+
+// Plano da clínica e uso atual — a tela de configurações mostra isso ao cliente.
+app.get('/api/plano', async (req, res) => {
+  const cid = clinica(req);
+
+  if (!mysqlReady) {
+    const plano = obterPlano('essencial');
+    return res.json({ plano, uso: { dentistas: 0, usuarios: demoUsers.length } });
+  }
+
+  try {
+    const [linha] = await query('SELECT nome, slug, plano, ativo FROM clinicas WHERE id = ? LIMIT 1', [cid]);
+    if (!linha) return res.status(404).json({ error: 'Clínica não encontrada.' });
+
+    const [[{ total: dentistas }], [{ total: usuarios }]] = await Promise.all([
+      query('SELECT COUNT(*) AS total FROM dentistas WHERE clinica_id = ?', [cid]),
+      query('SELECT COUNT(*) AS total FROM usuarios WHERE clinica_id = ?', [cid]),
+    ]);
+
+    return res.json({
+      clinica: linha,
+      plano: obterPlano(linha.plano),
+      uso: { dentistas: Number(dentistas), usuarios: Number(usuarios) },
+    });
+  } catch (error) {
+    console.warn('[api:plano]', error.message);
+    return res.status(500).json({ error: 'Não foi possível carregar o plano.' });
+  }
+});
 
 app.get('/api/usuarios/me', async (req, res) => {
   const id = req.usuario?.sub;
@@ -699,6 +817,11 @@ app.get('/api/usuarios/me', async (req, res) => {
       `${SELECT_USUARIOS} WHERE u.clinica_id = ? AND (u.id = ? OR u.email = ?) LIMIT 1`,
       [clinica(req), id, id],
     );
+
+    // token_version mudou depois da emissão? A sessão foi revogada.
+    if (rows[0] && Number(rows[0].token_version || 0) !== Number(req.usuario?.tv || 0)) {
+      return res.status(401).json({ error: 'Sessão encerrada. Faça login novamente.' });
+    }
     const usuario = moldarUsuario(rows[0]);
     if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
     return res.json(usuario);
@@ -822,6 +945,19 @@ registerCrud(app, {
   isMysqlReady: () => mysqlReady,
   clinicaDe: (req) => req.usuario?.clinica_id,
   auditarReq,
+  // Aplica o limite do plano no servidor, dentro do próprio CRUD.
+  antesDeCriar: async (rota, req) => {
+    if (!mysqlReady || !LIMITADOS_POR_PLANO.includes(rota)) return null;
+
+    const cid = clinica(req);
+    const [clinicaRow] = await query('SELECT plano FROM clinicas WHERE id = ? LIMIT 1', [cid]);
+    if (!clinicaRow) return null;
+
+    const resultado = await verificarLimite(clinicaRow.plano, cid, rota, 1);
+    if (resultado.ok) return null;
+
+    return { status: 402, error: resultado.mensagem, limite: resultado.limite };
+  },
   dadosDemo: {
     demoPacientes,
     demoDentistas,

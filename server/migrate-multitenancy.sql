@@ -189,4 +189,19 @@ SET @s := IF(@fk = 0,
   'SELECT 1');
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
+-- ---------------------------------------------------------------------------
+-- 6. Revogação de sessão (token_version)
+-- ---------------------------------------------------------------------------
+-- Incrementar token_version invalida todos os tokens emitidos antes: é o que
+-- faz o "sair de todos os dispositivos" e a revogação pelo admin funcionarem
+-- mesmo com token sem estado no servidor.
+SET @tem_tv := (SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'token_version');
+
+SET @s := IF(@tem_tv = 0,
+  'ALTER TABLE usuarios ADD COLUMN token_version INT NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+
 SELECT 'multi-tenancy aplicada' AS ok, COUNT(*) AS clinicas FROM clinicas;

@@ -74,7 +74,7 @@ const filtrarCampos = (corpo, campos) => {
 
 const comTimestamp = (dados) => ({ ...dados, updated_at: new Date() });
 
-export const registerCrud = (app, { query, isMysqlReady, dadosDemo, clinicaDe, auditarReq }) => {
+export const registerCrud = (app, { query, isMysqlReady, dadosDemo, clinicaDe, auditarReq, antesDeCriar }) => {
   const erro = (res, status, mensagem) => res.status(status).json({ error: mensagem });
 
   // Toda operação é fixada na clínica do token. Sem isso, um usuário poderia
@@ -90,6 +90,15 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo, clinicaDe, a
       const dados = filtrarCampos(req.body, campos);
       if (!Object.keys(dados).length) return erro(res, 400, 'Nenhum campo válido enviado.');
       const cid = clinicaId(req);
+
+      // Limite do plano é conferido aqui, não no front: um cliente que chamar
+      // a API direto não pode ultrapassar o que o plano permite.
+      if (antesDeCriar) {
+        const bloqueio = await antesDeCriar(rota, req);
+        if (bloqueio) {
+          return res.status(bloqueio.status || 402).json({ error: bloqueio.error, limite: bloqueio.limite });
+        }
+      }
 
       if (!isMysqlReady()) {
         const lista = fallback();

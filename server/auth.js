@@ -82,6 +82,7 @@ export const gerarToken = (usuario, validadeHoras = 12) => {
       sub: usuario.id,
       email: usuario.email,
       clinica_id: usuario.clinica_id ?? null,
+      tv: Number(usuario.token_version || 0),
       exp,
     }),
   );
@@ -108,9 +109,12 @@ export const lerToken = (token) => {
 };
 
 // Middleware: exige Authorization: Bearer <token> válido.
-// Libera /api/health e o login.
+// Libera /api/health, /api/plataforma/* (cadastro público) e o login.
 export const exigirToken = (req, res, next) => {
-  if (req.path === '/health' || req.path === '/usuarios/login') return next();
+  const caminho = req.path;
+
+  const publicas = ['/health', '/usuarios/login', '/plataforma/registrar', '/plataforma/planos'];
+  if (publicas.includes(caminho) || caminho.startsWith('/plataforma/')) return next();
 
   const cabecalho = req.headers.authorization || '';
   const token = cabecalho.startsWith('Bearer ') ? cabecalho.slice(7) : req.query.token;
