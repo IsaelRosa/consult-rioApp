@@ -315,18 +315,18 @@ app.get('/api/tratamentos', async (_req, res) => {
 
 app.get('/api/orcamentos', async (_req, res) => {
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM orcamentos ORDER BY created_at DESC', [], demoOrcamentos);
-    return res.json(rows);
+    const rows = await fetchFromDb(`${SELECT_ORCAMENTOS} ORDER BY o.created_at DESC`, [], demoOrcamentos);
+    return res.json(rows.map(comPacienteDentista));
   }
-  return res.json(demoOrcamentos);
+  return res.json(enriquecerOrcamentos(demoOrcamentos));
 });
 
 app.get('/api/pagamentos', async (_req, res) => {
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM pagamentos ORDER BY data_pagamento DESC', [], demoPagamentos);
-    return res.json(rows);
+    const rows = await fetchFromDb(`${SELECT_PAGAMENTOS} ORDER BY pg.data_pagamento DESC`, [], demoPagamentos);
+    return res.json(rows.map(comPacienteDentista));
   }
-  return res.json(demoPagamentos);
+  return res.json(enriquecerPagamentos(demoPagamentos));
 });
 
 app.get('/api/despesas', async (_req, res) => {
@@ -431,30 +431,53 @@ app.get('/api/dentistas/:id', async (_req, res) => {
 });
 
 app.put('/api/consultas/:id/status', async (_req, res) => {
-  const { status } = _req.body || {};
+  const { status, observacoes } = _req.body || {};
   const id = Number(_req.params.id);
+
   if (mysqlReady) {
-    const rows = await fetchFromDb('UPDATE consultas SET status = ? WHERE id = ? LIMIT 1', [status, id], demoConsultas);
-    const consulta = Array.isArray(rows) ? rows[0] : null;
-    if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
-    return res.json(consulta);
+    try {
+      // UPDATE devolve { affectedRows, changedRows }, não a linha — então
+      // consultamos de depois para devolver o registro atualizado.
+      const resultado = await query('UPDATE consultas SET status = ? WHERE id = ?', [status, id]);
+      if (!resultado.affectedRows) return res.status(404).json({ error: 'Consulta não encontrada' });
+
+      if (observacoes !== undefined) {
+        await query('UPDATE consultas SET observacoes = ? WHERE id = ?', [observacoes, id]);
+      }
+
+      const linhas = await query(`${SELECT_CONSULTAS} WHERE c.id = ? LIMIT 1`, [id]);
+      return res.json(comPaciente(linhas[0]));
+    } catch (error) {
+      console.warn('[api:consultas/status]', error.message);
+      return res.status(500).json({ error: 'Não foi possível atualizar a consulta.' });
+    }
   }
-  const consulta = demoConsultas.find((item) => item.id === id);
+
+  const consulta = demoConsultas.find((item) => Number(item.id) === id);
   if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
   consulta.status = status;
-  return res.json(consulta);
+  if (observacoes !== undefined) consulta.observacoes = observacoes;
+  return res.json(enriquecerDemo(consulta));
 });
 
 app.put('/api/orcamentos/:id/status', async (_req, res) => {
   const { status } = _req.body || {};
   const id = Number(_req.params.id);
+
   if (mysqlReady) {
-    const rows = await fetchFromDb('UPDATE orcamentos SET status = ? WHERE id = ? LIMIT 1', [status, id], demoOrcamentos);
-    const orcamento = Array.isArray(rows) ? rows[0] : null;
-    if (!orcamento) return res.status(404).json({ error: 'Orçamento não encontrado' });
-    return res.json(orcamento);
+    try {
+      const resultado = await query('UPDATE orcamentos SET status = ? WHERE id = ?', [status, id]);
+      if (!resultado.affectedRows) return res.status(404).json({ error: 'Orçamento não encontrado' });
+
+      const linhas = await query(`${SELECT_ORCAMENTOS} WHERE o.id = ? LIMIT 1`, [id]);
+      return res.json(comPacienteDentista(linhas[0]));
+    } catch (error) {
+      console.warn('[api:orcamentos/status]', error.message);
+      return res.status(500).json({ error: 'Não foi possível atualizar o orçamento.' });
+    }
   }
-  const orcamento = demoOrcamentos.find((item) => item.id === id);
+
+  const orcamento = demoOrcamentos.find((item) => Number(item.id) === id);
   if (!orcamento) return res.status(404).json({ error: 'Orçamento não encontrado' });
   orcamento.status = status;
   return res.json(orcamento);
@@ -484,6 +507,55 @@ registerCrud(app, {
     demoTratamentos,
   },
 });
+
+// ---------- Orçamentos e pagamentos: paciente/dentista embutidos ----------
+// As listas do front leem `o.paciente.nome` / `o.dentista.nome`; sem o join
+// as colunas saem vazias quando os dados vêm do MySQL.
+
+const SELECT_ORCAMENTOS = `
+  SELECT o.*,
+         p.nome AS paciente_nome, p.telefone AS paciente_telefone,
+         p.email AS paciente_email, p.convenio AS paciente_convenio,
+         d.nome AS dentista_nome, d.cro AS dentista_cro
+  FROM orcamentos o
+  LEFT JOIN pacientes p ON p.id = o.paciente_id
+  LEFT JOIN dentistas d ON d.id = o.dentista_id
+`;
+
+const SELECT_PAGAMENTOS = `
+  SELECT pg.*,
+         p.nome AS paciente_nome, p.telefone AS paciente_telefone,
+         p.email AS paciente_email, p.convenio AS paciente_convenio
+  FROM pagamentos pg
+  LEFT JOIN pacientes p ON p.id = pg.paciente_id
+`;
+
+// Achata paciente_nome/dentista_nome em objetos `paciente` / `dentista`.
+const comPacienteDentista = (linha) => {
+  if (!linha) return linha;
+  const { paciente_nome, paciente_telefone, paciente_email, paciente_convenio, dentista_nome, dentista_cro, ...resto } = linha;
+  return {
+    ...resto,
+    paciente: paciente_nome
+      ? { id: resto.paciente_id, nome: paciente_nome, telefone: paciente_telefone, email: paciente_email, convenio: paciente_convenio }
+      : null,
+    dentista: dentista_nome ? { id: resto.dentista_id, nome: dentista_nome, cro: dentista_cro } : null,
+  };
+};
+
+// No modo demo as linhas do seed já vêm com os objetos aninhados.
+const enriquecerOrcamentos = (lista) =>
+  lista.map((linha) => ({
+    ...linha,
+    paciente: linha.paciente ?? demoPacientes.find((p) => Number(p.id) === Number(linha.paciente_id)) ?? null,
+    dentista: linha.dentista ?? demoDentistas.find((d) => Number(d.id) === Number(linha.dentista_id)) ?? null,
+  }));
+
+const enriquecerPagamentos = (lista) =>
+  lista.map((linha) => ({
+    ...linha,
+    paciente: linha.paciente ?? demoPacientes.find((p) => Number(p.id) === Number(linha.paciente_id)) ?? null,
+  }));
 
 // ---------- Front-end (Vite build) ----------
 const indexHtml = path.join(DIST, 'index.html');
