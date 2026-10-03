@@ -210,6 +210,24 @@ CREATE TABLE IF NOT EXISTS odontograma (
   FOREIGN KEY (procedimento_id) REFERENCES procedimentos(id)
 );
 
+-- Assinatura (cobrança recorrente). `referencia` é o identificador que o
+-- gateway devolve no webhook para localizar a assinatura.
+CREATE TABLE IF NOT EXISTS assinaturas (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  clinica_id INT NOT NULL,
+  plano VARCHAR(40) NOT NULL DEFAULT 'essencial',
+  valor_mensal DECIMAL(10,2) NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+  referencia VARCHAR(64) NULL,
+  iniciada_em DATETIME NULL,
+  renovada_em DATETIME NULL,
+  cancelada_em DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_assinatura_referencia (referencia),
+  INDEX idx_assinaturas_clinica (clinica_id, status),
+  CONSTRAINT fk_assinaturas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)
+);
+
 -- Trilha de auditoria (LGPD)
 CREATE TABLE IF NOT EXISTS auditoria (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,

@@ -120,6 +120,7 @@ export const exigirToken = (req, res, next) => {
     '/plataforma/planos',
     '/plataforma/recuperar-senha',
     '/plataforma/redefinir-senha',
+    '/plataforma/webhook-pagamento',
   ];
   if (publicas.includes(caminho) || caminho.startsWith('/plataforma/')) return next();
 

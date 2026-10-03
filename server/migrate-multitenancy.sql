@@ -71,6 +71,23 @@ CREATE TABLE IF NOT EXISTS tokens_recuperacao (
   CONSTRAINT fk_recuperacao_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 );
 
+-- Assinatura (cobrança recorrente)
+CREATE TABLE IF NOT EXISTS assinaturas (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  clinica_id INT NOT NULL,
+  plano VARCHAR(40) NOT NULL DEFAULT 'essencial',
+  valor_mensal DECIMAL(10,2) NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+  referencia VARCHAR(64) NULL,
+  iniciada_em DATETIME NULL,
+  renovada_em DATETIME NULL,
+  cancelada_em DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_assinatura_referencia (referencia),
+  INDEX idx_assinaturas_clinica (clinica_id, status),
+  CONSTRAINT fk_assinaturas_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)
+);
+
 -- ---------------------------------------------------------------------------
 -- 4. clinica_id em cada tabela de negócio
 --    Cada bloco só executa o ALTER se a coluna ainda não existir.

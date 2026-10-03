@@ -22,7 +22,7 @@ import {
 import type { PerfilSlug } from '../types';
 
 const navItems: { to: string; label: string; icon: React.ElementType; permissao: string }[] = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, permissao: 'dashboard' },
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, permissao: 'dashboard' },
   { to: '/pacientes', label: 'Pacientes', icon: Users, permissao: 'pacientes' },
   { to: '/dentistas', label: 'Dentistas', icon: Stethoscope, permissao: 'dentistas' },
   { to: '/agenda', label: 'Agenda', icon: CalendarDays, permissao: 'agenda' },
@@ -33,6 +33,7 @@ const navItems: { to: string; label: string; icon: React.ElementType; permissao:
   { to: '/financeiro', label: 'Financeiro', icon: DollarSign, permissao: 'financeiro' },
   { to: '/relatorios', label: 'Relatórios', icon: BarChart3, permissao: 'relatorios' },
   { to: '/usuarios', label: 'Usuários', icon: Shield, permissao: 'usuarios' },
+  { to: '/planos', label: 'Plano e assinatura', icon: CreditCard, permissao: 'usuarios' },
 ];
 
 export default function Layout() {

@@ -13,6 +13,7 @@ import { registrarClinica } from './cadastro.js';
 import { verificarLimite, PLANOS, obterPlano } from './planos.js';
 import { enviar, smtpConfigurado } from './mailer.js';
 import { solicitarRecuperacao, consumirToken, marcarUsado, VALIDADE as VALIDADE_RECOVERACAO } from './recuperacao.js';
+import { assinar, assinaturaVigente, historico, aplicarWebhook, provedorConfigurado, gerarReferencia } from './assinaturas.js';
 import { gerarHashSenha, verificarSenha, precisaRehash, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
@@ -158,6 +159,22 @@ app.post(
     }
   },
 );
+
+// Confirmação de pagamento vinda do gateway. Público por natureza, mas
+// autenticado pelo segredo compartilhado — sem isso qualquer um ativaria
+// planos de graça.
+app.post('/api/plataforma/webhook-pagamento', async (req, res) => {
+  const segredo = req.get('X-Assinatura-Secreta') || req.query.segredo;
+  try {
+    const resultado = await aplicarWebhook(req.body, segredo);
+    if (resultado.erro) return res.status(resultado.erro.status).json({ error: resultado.erro.error });
+    console.log(`[assinatura] webhook aplicado: ${resultado.assinatura} -> ${resultado.status}`);
+    return res.json({ ok: true });
+  } catch (error) {
+    console.warn('[assinatura:webhook]', error.message);
+    return res.status(500).json({ error: 'Não foi possível processar o webhook.' });
+  }
+});
 
 app.use('/api', exigirToken);
 
@@ -854,6 +871,94 @@ app.post('/api/usuarios/logout', async (req, res) => {
   }
 
   return res.json({ ok: true });
+});
+
+// ---------- Assinatura e cobrança ----------
+
+// Situação atual da assinatura da clínica logada.
+app.get('/api/assinatura', async (req, res) => {
+  const cid = clinica(req);
+
+  if (!mysqlReady) {
+    return res.json({ assinatura: null, plano: obterPlano('essencial'), provedor: false });
+  }
+
+  try {
+    const [clinicaRow] = await query('SELECT nome, slug, plano, ativo FROM clinicas WHERE id = ? LIMIT 1', [cid]);
+    const assinatura = await assinaturaVigente(cid);
+
+    return res.json({
+      clinica: clinicaRow ?? null,
+      assinatura,
+      plano: obterPlano(clinicaRow?.plano),
+      provedor: provedorConfigurado(),
+    });
+  } catch (error) {
+    console.warn('[api:assinatura]', error.message);
+    return res.status(500).json({ error: 'Não foi possível carregar a assinatura.' });
+  }
+});
+
+// Inicia (ou troca) a assinatura de um plano.
+app.post('/api/assinatura/assinar', async (req, res) => {
+  const cid = clinica(req);
+  const plano = String(req.body?.plano || '');
+
+  if (!PLANOS[plano]) {
+    return res.status(400).json({ error: 'Plano inválido.' });
+  }
+
+  // Sem gateway não há como cobrar. Dizer isso é melhor que devolver uma
+  // assinatura "ativa" que ninguém pagou.
+  if (!provedorConfigurado()) {
+    return res.status(503).json({
+      error: 'O pagamento ainda não está disponível. Fale com a gente para ativar sua assinatura.',
+      provedor: false,
+    });
+  }
+
+  try {
+    const resultado = await assinar(cid, plano);
+    auditarReq(req, 'assinar', 'assinaturas', resultado.assinaturaId ?? null, { plano });
+
+    if (resultado.jaAssinante) {
+      return res.json({ ok: true, jaAssinante: true, plano });
+    }
+
+    const referencia = gerarReferencia();
+    await query('UPDATE assinaturas SET referencia = ? WHERE id = ?', [referencia, resultado.assinaturaId]);
+
+    // O checkout é montado pelo gateway (Mercado Pago/Stripe). O ponto de
+    // entrada fica em 'checkout'; ajuste ao integrar.
+    return res.status(201).json({
+      ok: true,
+      referencia,
+      plano,
+      valor: resultado.valor,
+      checkout: {
+        metodo: 'redirect',
+        // Substitua pelo link/SDK do provedor na hora da integração.
+        url: null,
+        observacao: 'Integração com o gateway pendente: defina PAGAMENTO_PROVEDOR e PAGAMENTO_CHAVE.',
+      },
+    });
+  } catch (error) {
+    console.warn('[api:assinatura:assinar]', error.message);
+    const mapeado = erroDeBanco(error);
+    return res.status(mapeado.status).json({ error: mapeado.error });
+  }
+});
+
+app.get('/api/assinatura/historico', async (req, res) => {
+  const cid = clinica(req);
+  if (!mysqlReady) return res.json({ historico: [] });
+
+  try {
+    return res.json({ historico: await historico(cid) });
+  } catch (error) {
+    console.warn('[api:assinatura/historico]', error.message);
+    return res.status(500).json({ error: 'Não foi possível carregar o histórico.' });
+  }
 });
 
 // Plano da clínica e uso atual — a tela de configurações mostra isso ao cliente.

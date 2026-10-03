@@ -17,18 +17,23 @@ import Relatorios from './pages/Relatorios';
 import Usuarios from './pages/Usuarios';
 import Cadastro from './pages/Cadastro';
 import RecuperarSenha from './pages/RecuperarSenha';
+import Home from './pages/Home';
+import Planos from './pages/Planos';
 
 function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/inicio" element={<Home />} />
           <Route path="/login" element={<Login />} />
           <Route path="/cadastro" element={<Cadastro />} />
           <Route path="/recuperar-senha" element={<RecuperarSenha />} />
           <Route path="/redefinir-senha" element={<RecuperarSenha />} />
           <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<Home />} />
+            <Route path="/planos" element={<ProtectedRoute permissao="usuarios"><Planos /></ProtectedRoute>} />
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/pacientes" element={<ProtectedRoute permissao="pacientes"><Pacientes /></ProtectedRoute>} />
             <Route path="/dentistas" element={<ProtectedRoute permissao="dentistas"><Dentistas /></ProtectedRoute>} />
             <Route path="/agenda" element={<ProtectedRoute permissao="agenda"><Agenda /></ProtectedRoute>} />
@@ -41,7 +46,7 @@ function App() {
             <Route path="/relatorios" element={<ProtectedRoute permissao="relatorios"><Relatorios /></ProtectedRoute>} />
             <Route path="/usuarios" element={<ProtectedRoute permissao="usuarios"><Usuarios /></ProtectedRoute>} />
           </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/inicio" replace />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
