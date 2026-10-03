@@ -74,8 +74,12 @@ const filtrarCampos = (corpo, campos) => {
 
 const comTimestamp = (dados) => ({ ...dados, updated_at: new Date() });
 
-export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
+export const registerCrud = (app, { query, isMysqlReady, dadosDemo, clinicaDe, auditarReq }) => {
   const erro = (res, status, mensagem) => res.status(status).json({ error: mensagem });
+
+  // Toda operação é fixada na clínica do token. Sem isso, um usuário poderia
+  // ler ou alterar registros de outra clínica trocando o id na URL.
+  const clinicaId = (req) => Number(clinicaDe(req) || 1);
 
   for (const [rota, entidade] of Object.entries(ENTIDADES)) {
     const { tabela, campos, demo } = entidade;
@@ -85,27 +89,40 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
     app.post(`/api/${rota}`, async (req, res) => {
       const dados = filtrarCampos(req.body, campos);
       if (!Object.keys(dados).length) return erro(res, 400, 'Nenhum campo válido enviado.');
+      const cid = clinicaId(req);
 
       if (!isMysqlReady()) {
         const lista = fallback();
         const novo = {
           id: (lista[0]?.id ?? 0) + 1 + lista.length,
           ...dados,
+          clinica_id: cid,
           created_at: new Date().toISOString(),
         };
         lista.unshift(novo);
+        auditarReq?.(req, 'criar', tabela, novo.id, dados);
         return res.status(201).json(novo);
       }
 
       try {
-        const colunas = Object.keys(dados);
+        // clinica_id vem do token, nunca do corpo da requisição.
+        const campos = Object.keys(dados);
+        const colunas = [...campos, 'clinica_id'];
+        // Os valores saem de `dados` (sem clinica_id) + o id da clínica:
+        // mapear sobre `colunas` leria dados.clinica_id = undefined.
+        const valores = [...campos.map((c) => dados[c]), cid];
         const marcadores = colunas.map(() => '?').join(', ');
+
         const criado = await query(
           `INSERT INTO ${tabela} (${colunas.join(', ')}) VALUES (${marcadores})`,
-          colunas.map((c) => dados[c]),
+          valores,
         );
         const id = criado.insertId;
-        const [linha] = await query(`SELECT * FROM ${tabela} WHERE id = ? LIMIT 1`, [id]);
+        const [linha] = await query(
+          `SELECT * FROM ${tabela} WHERE id = ? AND clinica_id = ? LIMIT 1`,
+          [id, cid],
+        );
+        auditarReq?.(req, 'criar', tabela, id, dados);
         return res.status(201).json(linha);
       } catch (error) {
         console.warn(`[crud:${rota}] insert falhou:`, error.message);
@@ -118,12 +135,14 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
       const dados = comTimestamp(filtrarCampos(req.body, campos));
       if (!Number.isInteger(id)) return erro(res, 400, 'ID inválido.');
       if (!Object.keys(dados).length) return erro(res, 400, 'Nenhum campo válido enviado.');
+      const cid = clinicaId(req);
 
       if (!isMysqlReady()) {
         const lista = fallback();
         const alvo = lista.find((item) => Number(item.id) === id);
         if (!alvo) return erro(res, 404, 'Registro não encontrado.');
         Object.assign(alvo, dados);
+        auditarReq?.(req, 'atualizar', tabela, id, dados);
         return res.json(alvo);
       }
 
@@ -131,11 +150,15 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
         const colunas = Object.keys(dados);
         const atribuicoes = colunas.map((c) => `${c} = ?`).join(', ');
         const resultado = await query(
-          `UPDATE ${tabela} SET ${atribuicoes} WHERE id = ?`,
-          [...colunas.map((c) => dados[c]), id],
+          `UPDATE ${tabela} SET ${atribuicoes} WHERE id = ? AND clinica_id = ?`,
+          [...colunas.map((c) => dados[c]), id, cid],
         );
         if (!resultado.affectedRows) return erro(res, 404, 'Registro não encontrado.');
-        const [linha] = await query(`SELECT * FROM ${tabela} WHERE id = ? LIMIT 1`, [id]);
+        const [linha] = await query(
+          `SELECT * FROM ${tabela} WHERE id = ? AND clinica_id = ? LIMIT 1`,
+          [id, cid],
+        );
+        auditarReq?.(req, 'atualizar', tabela, id, dados);
         return res.json(linha);
       } catch (error) {
         console.warn(`[crud:${rota}] update falhou:`, error.message);
@@ -146,6 +169,7 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
     app.get(`/api/${rota}/:id`, async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id)) return erro(res, 400, 'ID inválido.');
+      const cid = clinicaId(req);
 
       if (!isMysqlReady()) {
         const item = fallback().find((registro) => Number(registro.id) === id);
@@ -154,7 +178,10 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
       }
 
       try {
-        const [linha] = await query(`SELECT * FROM ${tabela} WHERE id = ? LIMIT 1`, [id]);
+        const [linha] = await query(
+          `SELECT * FROM ${tabela} WHERE id = ? AND clinica_id = ? LIMIT 1`,
+          [id, cid],
+        );
         if (!linha) return erro(res, 404, 'Registro não encontrado.');
         return res.json(linha);
       } catch (error) {
@@ -166,18 +193,21 @@ export const registerCrud = (app, { query, isMysqlReady, dadosDemo }) => {
     app.delete(`/api/${rota}/:id`, async (req, res) => {
       const id = Number(req.params.id);
       if (!Number.isInteger(id)) return erro(res, 400, 'ID inválido.');
+      const cid = clinicaId(req);
 
       if (!isMysqlReady()) {
         const lista = fallback();
         const indice = lista.findIndex((item) => Number(item.id) === id);
         if (indice === -1) return erro(res, 404, 'Registro não encontrado.');
         lista.splice(indice, 1);
+        auditarReq?.(req, 'excluir', tabela, id);
         return res.json({ ok: true });
       }
 
       try {
-        const resultado = await query(`DELETE FROM ${tabela} WHERE id = ?`, [id]);
+        const resultado = await query(`DELETE FROM ${tabela} WHERE id = ? AND clinica_id = ?`, [id, cid]);
         if (!resultado.affectedRows) return erro(res, 404, 'Registro não encontrado.');
+        auditarReq?.(req, 'excluir', tabela, id);
         return res.json({ ok: true });
       } catch (error) {
         console.warn(`[crud:${rota}] delete falhou:`, error.message);

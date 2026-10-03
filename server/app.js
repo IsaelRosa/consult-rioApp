@@ -6,6 +6,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { query, testConnection } from './db.js';
 import { registerCrud } from './crud.js';
+import { auditarReq } from './auditoria.js';
+import { TENANT_TABLES } from './tenant.js';
 import { gerarHashSenha, verificarSenha, precisaRehash, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
@@ -65,6 +67,17 @@ const fetchFromDb = async (sql, params = [], fallback) => {
     console.warn('[api:mysql-fallback]', error.message);
     return fallback;
   }
+};
+
+// Clínica da requisição, vem do token assinado (ver server/auth.js e tenant.js).
+const clinica = (req) => {
+  const id = Number(req.usuario?.clinica_id);
+  if (!Number.isInteger(id) || id <= 0) {
+    const erro = new Error('Usuário não vinculado a nenhuma clínica.');
+    erro.status = 403;
+    throw erro;
+  }
+  return id;
 };
 
 app.get('/api/health', (_req, res) => {
@@ -139,9 +152,9 @@ const comProcedimentos = async (consulta) => {
                 pr.categoria AS procedimento_categoria, pr.valor_padrao AS procedimento_valor_padrao
          FROM consulta_procedimentos cp
          LEFT JOIN procedimentos pr ON pr.id = cp.procedimento_id
-         WHERE cp.consulta_id = ?
+         WHERE cp.clinica_id = ? AND cp.consulta_id = ?
          ORDER BY cp.id`,
-        [consulta.id],
+        [consulta.clinica_id ?? 1, consulta.id],
       );
       return {
         ...consulta,
@@ -160,15 +173,16 @@ const comProcedimentos = async (consulta) => {
   return enriquecerDemo(consulta);
 };
 
-app.get('/api/consultas', async (_req, res) => {
-  const pacienteId = Number(_req.query.paciente_id || 0);
+app.get('/api/consultas', async (req, res) => {
+  const pacienteId = Number(req.query.paciente_id || 0);
+  const cid = clinica(req);
 
   if (mysqlReady) {
     const linhas = await fetchFromDb(
       pacienteId
-        ? `${SELECT_CONSULTAS} WHERE c.paciente_id = ? ORDER BY c.data_hora_inicio ASC`
-        : `${SELECT_CONSULTAS} ORDER BY c.data_hora_inicio ASC`,
-      pacienteId ? [pacienteId] : [],
+        ? `${SELECT_CONSULTAS} WHERE c.clinica_id = ? AND c.paciente_id = ? ORDER BY c.data_hora_inicio ASC`
+        : `${SELECT_CONSULTAS} WHERE c.clinica_id = ? ORDER BY c.data_hora_inicio ASC`,
+      pacienteId ? [cid, pacienteId] : [cid],
       demoConsultas,
     );
     return res.json(linhas.map(comPaciente));
@@ -180,11 +194,12 @@ app.get('/api/consultas', async (_req, res) => {
   return res.json(lista.map(enriquecerDemo));
 });
 
-app.get('/api/consultas/:id', async (_req, res) => {
-  const id = Number(_req.params.id);
+app.get('/api/consultas/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const cid = clinica(req);
 
   if (mysqlReady) {
-    const linhas = await fetchFromDb(`${SELECT_CONSULTAS} WHERE c.id = ? LIMIT 1`, [id], []);
+    const linhas = await fetchFromDb(`${SELECT_CONSULTAS} WHERE c.clinica_id = ? AND c.id = ? LIMIT 1`, [cid, id], []);
     const consulta = Array.isArray(linhas) ? linhas[0] : null;
     if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
     return res.json(await comProcedimentos(comPaciente(consulta)));
@@ -217,13 +232,24 @@ app.post('/api/procedimentos-consulta', async (req, res) => {
   };
 
   if (mysqlReady) {
+    const cid = clinica(req);
     try {
-      await query(
-        `INSERT INTO consulta_procedimentos (consulta_id, procedimento_id, quantidade, valor_cobrado)
-         VALUES (?, ?, ?, ?)`,
-        [consultaId, procedimentoId, registro.quantidade, registro.valor_cobrado],
+      // A consulta precisa pertencer à clínica do token, senão dava para
+      // lançar procedimento em atendimento de outra clínica.
+      const [dono] = await query('SELECT id FROM consultas WHERE id = ? AND clinica_id = ? LIMIT 1', [consultaId, cid]);
+      if (!dono) return res.status(404).json({ error: 'Consulta não encontrada.' });
+
+      const criado = await query(
+        `INSERT INTO consulta_procedimentos
+           (clinica_id, consulta_id, procedimento_id, quantidade, valor_cobrado)
+         VALUES (?, ?, ?, ?, ?)`,
+        [cid, consultaId, procedimentoId, registro.quantidade, registro.valor_cobrado],
       );
-      const [linha] = await query('SELECT * FROM consulta_procedimentos WHERE id = ? LIMIT 1', [registro.id]);
+      const [linha] = await query(
+        'SELECT * FROM consulta_procedimentos WHERE id = ? AND clinica_id = ? LIMIT 1',
+        [criado.insertId, cid],
+      );
+      auditarReq(req, 'criar', 'consulta_procedimentos', criado.insertId, registro);
       const procedimento = demoProcedimentos.find((p) => Number(p.id) === procedimentoId) ?? null;
       return res.status(201).json({ ...(linha ?? registro), procedimento });
     } catch (error) {
@@ -237,7 +263,8 @@ app.post('/api/procedimentos-consulta', async (req, res) => {
   return res.status(201).json({ ...registro, procedimento });
 });
 
-app.get('/api/dashboard', async (_req, res) => {
+app.get('/api/dashboard', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
     // Cada métrica é buscada por conta própria: se uma falhar (por exemplo,
     // a coluna `ativo` ainda não existir em `pacientes`), as outras continuam
@@ -268,44 +295,47 @@ app.get('/api/dashboard', async (_req, res) => {
     const FIM_MES = 'LAST_DAY(CURDATE())';
 
     const consultasHoje = await seguro(
-      'SELECT COUNT(*) AS total FROM consultas WHERE DATE(data_hora_inicio) = CURDATE()',
-      [],
+      'SELECT COUNT(*) AS total FROM consultas WHERE clinica_id = ? AND DATE(data_hora_inicio) = CURDATE()',
+      [cid],
       { total: 0 },
     );
 
     const consultasSemana = await seguro(
       `SELECT COUNT(*) AS total FROM consultas
-       WHERE DATE(data_hora_inicio) BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE()`,
-      [],
+       WHERE clinica_id = ?
+         AND DATE(data_hora_inicio) BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE()`,
+      [cid],
       { total: 0 },
     );
 
     // Tenta com `ativo`; se a coluna não existir (banco antigo), conta todos.
     let pacientesAtivos;
     try {
-      pacientesAtivos = await query('SELECT COUNT(*) AS total FROM pacientes WHERE ativo = 1');
+      pacientesAtivos = await query('SELECT COUNT(*) AS total FROM pacientes WHERE clinica_id = ? AND ativo = 1', [cid]);
     } catch {
       console.warn('[api:dashboard] coluna pacientes.ativo ausente — rode server/migrate.sql');
-      pacientesAtivos = await query('SELECT COUNT(*) AS total FROM pacientes').catch(() => []);
+      pacientesAtivos = await query('SELECT COUNT(*) AS total FROM pacientes WHERE clinica_id = ?', [cid]).catch(() => []);
     }
 
     const faturamento = await seguro(
       `SELECT COALESCE(SUM(valor), 0) AS total FROM pagamentos
-       WHERE status = 'pago' AND DATE(data_pagamento) BETWEEN ${INICIO_MES} AND ${FIM_MES}`,
-      [],
+       WHERE clinica_id = ? AND status = 'pago'
+         AND DATE(data_pagamento) BETWEEN ${INICIO_MES} AND ${FIM_MES}`,
+      [cid],
       { total: 0 },
     );
 
     const despesas = await seguro(
       `SELECT COALESCE(SUM(valor), 0) AS total FROM despesas
-       WHERE status = 'pago' AND DATE(data_despesa) BETWEEN ${INICIO_MES} AND ${FIM_MES}`,
-      [],
+       WHERE clinica_id = ? AND status = 'pago'
+         AND DATE(data_despesa) BETWEEN ${INICIO_MES} AND ${FIM_MES}`,
+      [cid],
       { total: 0 },
     );
 
     const status = await seguroLista(
-      'SELECT status, COUNT(*) AS total FROM consultas GROUP BY status',
-      [],
+      'SELECT status, COUNT(*) AS total FROM consultas WHERE clinica_id = ? GROUP BY status',
+      [cid],
     );
 
     const meses = await seguroLista(
@@ -313,10 +343,10 @@ app.get('/api/dashboard', async (_req, res) => {
          DATE_FORMAT(data_pagamento, '%Y-%m') AS mes,
          COALESCE(SUM(valor), 0) AS receitas
        FROM pagamentos
-       WHERE status = 'pago'
+       WHERE clinica_id = ? AND status = 'pago'
          AND data_pagamento >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
        GROUP BY mes`,
-      [],
+      [cid],
     );
 
     const despesasPorMes = await seguroLista(
@@ -324,19 +354,20 @@ app.get('/api/dashboard', async (_req, res) => {
          DATE_FORMAT(data_despesa, '%Y-%m') AS mes,
          COALESCE(SUM(valor), 0) AS despesas
        FROM despesas
-       WHERE status = 'pago'
+       WHERE clinica_id = ? AND status = 'pago'
          AND data_despesa >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
        GROUP BY mes`,
-      [],
+      [cid],
     );
 
     const proximas = await seguroLista(
       `${SELECT_CONSULTAS}
-       WHERE c.data_hora_inicio >= NOW()
+       WHERE c.clinica_id = ?
+         AND c.data_hora_inicio >= NOW()
          AND c.status NOT IN ('cancelado', 'concluido')
        ORDER BY c.data_hora_inicio ASC
        LIMIT 5`,
-      [],
+      [cid],
     );
 
     const FATURAMENTO = Number(faturamento.total || 0);
@@ -383,39 +414,47 @@ app.get('/api/perfis', async (_req, res) => {
   return res.json(demoPerfis);
 });
 
-app.get('/api/pacientes', async (_req, res) => {
+app.get('/api/pacientes', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM pacientes ORDER BY nome', [], demoPacientes);
+    const rows = await fetchFromDb('SELECT * FROM pacientes WHERE clinica_id = ? ORDER BY nome', [cid], demoPacientes);
     return res.json(rows);
   }
   return res.json(demoPacientes);
 });
 
-app.get('/api/dentistas', async (_req, res) => {
+app.get('/api/dentistas', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM dentistas ORDER BY nome', [], demoDentistas);
+    const rows = await fetchFromDb('SELECT * FROM dentistas WHERE clinica_id = ? ORDER BY nome', [cid], demoDentistas);
     return res.json(rows);
   }
   return res.json(demoDentistas);
 });
 
 
-app.get('/api/procedimentos', async (_req, res) => {
+app.get('/api/procedimentos', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM procedimentos WHERE ativo = 1 ORDER BY nome', [], demoProcedimentos);
+    const rows = await fetchFromDb(
+      'SELECT * FROM procedimentos WHERE clinica_id = ? AND ativo = 1 ORDER BY nome',
+      [cid],
+      demoProcedimentos,
+    );
     return res.json(rows);
   }
   return res.json(demoProcedimentos);
 });
 
-app.get('/api/tratamentos', async (_req, res) => {
-  const pacienteId = Number(_req.query.paciente_id || 0);
+app.get('/api/tratamentos', async (req, res) => {
+  const pacienteId = Number(req.query.paciente_id || 0);
+  const cid = clinica(req);
   if (mysqlReady) {
     const rows = await fetchFromDb(
       pacienteId
-        ? 'SELECT * FROM tratamentos WHERE paciente_id = ? ORDER BY created_at DESC'
-        : 'SELECT * FROM tratamentos ORDER BY created_at DESC',
-      pacienteId ? [pacienteId] : [],
+        ? 'SELECT * FROM tratamentos WHERE clinica_id = ? AND paciente_id = ? ORDER BY created_at DESC'
+        : 'SELECT * FROM tratamentos WHERE clinica_id = ? ORDER BY created_at DESC',
+      pacienteId ? [cid, pacienteId] : [cid],
       demoTratamentos,
     );
     return res.json(rows);
@@ -424,25 +463,40 @@ app.get('/api/tratamentos', async (_req, res) => {
   return res.json(data);
 });
 
-app.get('/api/orcamentos', async (_req, res) => {
+app.get('/api/orcamentos', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb(`${SELECT_ORCAMENTOS} ORDER BY o.created_at DESC`, [], demoOrcamentos);
+    const rows = await fetchFromDb(
+      `${SELECT_ORCAMENTOS} WHERE o.clinica_id = ? ORDER BY o.created_at DESC`,
+      [cid],
+      demoOrcamentos,
+    );
     return res.json(rows.map(comPacienteDentista));
   }
   return res.json(enriquecerOrcamentos(demoOrcamentos));
 });
 
-app.get('/api/pagamentos', async (_req, res) => {
+app.get('/api/pagamentos', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb(`${SELECT_PAGAMENTOS} ORDER BY pg.data_pagamento DESC`, [], demoPagamentos);
+    const rows = await fetchFromDb(
+      `${SELECT_PAGAMENTOS} WHERE pg.clinica_id = ? ORDER BY pg.data_pagamento DESC`,
+      [cid],
+      demoPagamentos,
+    );
     return res.json(rows.map(comPacienteDentista));
   }
   return res.json(enriquecerPagamentos(demoPagamentos));
 });
 
-app.get('/api/despesas', async (_req, res) => {
+app.get('/api/despesas', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM despesas ORDER BY data_despesa DESC', [], demoDespesas);
+    const rows = await fetchFromDb(
+      'SELECT * FROM despesas WHERE clinica_id = ? ORDER BY data_despesa DESC',
+      [cid],
+      demoDespesas,
+    );
     return res.json(rows);
   }
   return res.json(demoDespesas);
@@ -475,10 +529,12 @@ const erroDeBanco = (error) => {
 
 const loginComBanco = async (email, senha) => {
   const rows = await query(
-    `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash,
+    `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash, u.clinica_id,
+            c.nome AS clinica_nome, c.slug AS clinica_slug, c.ativo AS clinica_ativa,
             p.nome AS perfil_nome, p.slug AS perfil_slug
      FROM usuarios u
      LEFT JOIN perfis p ON p.id = u.perfil_id
+     LEFT JOIN clinicas c ON c.id = u.clinica_id
      WHERE u.email = ? LIMIT 1`,
     [email],
   );
@@ -486,6 +542,13 @@ const loginComBanco = async (email, senha) => {
   const linha = rows[0];
   if (!linha || !linha.ativo || !verificarSenha(senha, linha.password_hash)) {
     return { erro: { status: 401, error: 'E-mail ou senha inválidos.' } };
+  }
+
+  if (!linha.clinica_id) {
+    return { erro: { status: 403, error: 'Usuário não vinculado a uma clínica. Fale com o suporte.' } };
+  }
+  if (linha.clinica_ativa === 0 || linha.clinica_ativa === false) {
+    return { erro: { status: 403, error: 'A clínica está inativa. Regularize a assinatura.' } };
   }
 
   // Senha veio do seed em texto puro: re-hasheia agora (upgrade gradual).
@@ -512,27 +575,41 @@ app.post('/api/usuarios', async (req, res) => {
 
   const emailNormalizado = String(email).trim().toLowerCase();
   const id = crypto.randomUUID();
+  const cid = clinica(req);
 
   if (mysqlReady) {
     try {
-      const existentes = await query('SELECT id FROM usuarios WHERE email = ? LIMIT 1', [emailNormalizado]);
+      // E-mail é único por clínica: duas clínicas podem ter o mesmo e-mail.
+      const existentes = await query(
+        'SELECT id FROM usuarios WHERE email = ? AND clinica_id = ? LIMIT 1',
+        [emailNormalizado, cid],
+      );
       if (existentes[0]) return res.status(409).json({ error: 'Já existe um usuário com este e-mail.' });
 
       await query(
-        `INSERT INTO usuarios (id, auth_id, email, nome, perfil_id, password_hash, ativo)
-         VALUES (?, ?, ?, ?, ?, ?, TRUE)`,
-        [id, id, emailNormalizado, String(nome).trim(), Number(perfil_id) || 1, gerarHashSenha(String(senha))],
+        `INSERT INTO usuarios (id, auth_id, email, nome, perfil_id, password_hash, clinica_id, ativo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)`,
+        [id, id, emailNormalizado, String(nome).trim(), Number(perfil_id) || 1, gerarHashSenha(String(senha)), cid],
       );
 
-      const linhas = await query(`${SELECT_USUARIOS} WHERE u.id = ? LIMIT 1`, [id]);
+      const linhas = await query(`${SELECT_USUARIOS} WHERE u.id = ? AND u.clinica_id = ? LIMIT 1`, [id, cid]);
+      auditarReq(req, 'criar', 'usuarios', id, { email: emailNormalizado, perfil_id });
       return res.status(201).json(moldarUsuario(linhas[0]));
     } catch (error) {
       console.warn('[api:usuarios]', error.message);
-      return res.status(500).json({ error: 'Não foi possível criar o usuário.' });
+      const mapeado = erroDeBanco(error);
+      return res.status(mapeado.status).json({ error: mapeado.error });
     }
   }
 
-  const novo = { id, email: emailNormalizado, nome: String(nome).trim(), perfil_id: Number(perfil_id) || 1, ativo: true };
+  const novo = {
+    id,
+    email: emailNormalizado,
+    nome: String(nome).trim(),
+    perfil_id: Number(perfil_id) || 1,
+    clinica_id: cid,
+    ativo: true,
+  };
   demoUsers.push({ ...novo, password_hash: gerarHashSenha(String(senha)) });
   return res.status(201).json(novo);
 });
@@ -540,12 +617,17 @@ app.post('/api/usuarios', async (req, res) => {
 app.put('/api/usuarios/:id/ativo', async (req, res) => {
   const id = req.params.id;
   const ativo = req.body?.ativo ? 1 : 0;
+  const cid = clinica(req);
 
   if (mysqlReady) {
     try {
-      const resultado = await query('UPDATE usuarios SET ativo = ? WHERE id = ?', [ativo, id]);
+      const resultado = await query(
+        'UPDATE usuarios SET ativo = ? WHERE id = ? AND clinica_id = ?',
+        [ativo, id, cid],
+      );
       if (!resultado.affectedRows) return res.status(404).json({ error: 'Usuário não encontrado' });
-      const linhas = await query(`${SELECT_USUARIOS} WHERE u.id = ? LIMIT 1`, [id]);
+      const linhas = await query(`${SELECT_USUARIOS} WHERE u.id = ? AND u.clinica_id = ? LIMIT 1`, [id, cid]);
+      auditarReq(req, 'atualizar', 'usuarios', id, { ativo: Boolean(ativo) });
       return res.json(moldarUsuario(linhas[0]));
     } catch (error) {
       console.warn('[api:usuarios/ativo]', error.message);
@@ -559,22 +641,26 @@ app.put('/api/usuarios/:id/ativo', async (req, res) => {
   return res.json(alvo);
 });
 
-app.get('/api/usuarios', async (_req, res) => {
+app.get('/api/usuarios', async (req, res) => {
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb(`${SELECT_USUARIOS} ORDER BY u.nome`, [], []);
+    // Só usuários da própria clínica: a tela de usuários de uma clínica não
+    // pode listar staff de outra.
+    const rows = await fetchFromDb(`${SELECT_USUARIOS} WHERE u.clinica_id = ? ORDER BY u.nome`, [cid], []);
     return res.json(rows.map(moldarUsuario));
   }
   return res.json(demoUsers.map(({ password_hash, ...u }) => u));
 });
 
-app.get('/api/odontograma', async (_req, res) => {
-  const pacienteId = Number(_req.query.paciente_id || 0);
+app.get('/api/odontograma', async (req, res) => {
+  const pacienteId = Number(req.query.paciente_id || 0);
+  const cid = clinica(req);
   if (mysqlReady) {
     const rows = await fetchFromDb(
       pacienteId
-        ? 'SELECT * FROM odontograma WHERE paciente_id = ? ORDER BY dente ASC'
-        : 'SELECT * FROM odontograma ORDER BY dente ASC',
-      pacienteId ? [pacienteId] : [],
+        ? 'SELECT * FROM odontograma WHERE clinica_id = ? AND paciente_id = ? ORDER BY dente ASC'
+        : 'SELECT * FROM odontograma WHERE clinica_id = ? ORDER BY dente ASC',
+      pacienteId ? [cid, pacienteId] : [cid],
       demoOdontograma,
     );
     return res.json(rows);
@@ -585,18 +671,21 @@ app.get('/api/odontograma', async (_req, res) => {
 
 // Usuário da sessão atual, resolvido pelo token (id em `req.usuario`).
 const SELECT_USUARIOS = `
-  SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo,
+  SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.clinica_id,
+         c.nome AS clinica_nome, c.slug AS clinica_slug,
          p.nome AS perfil_nome, p.slug AS perfil_slug
   FROM usuarios u
   LEFT JOIN perfis p ON p.id = u.perfil_id
+  LEFT JOIN clinicas c ON c.id = u.clinica_id
 `;
 
 const moldarUsuario = (linha) => {
   if (!linha) return null;
-  const { perfil_nome, perfil_slug, password_hash, ...resto } = linha;
+  const { perfil_nome, perfil_slug, password_hash, clinica_nome, clinica_slug, ...resto } = linha;
   return {
     ...resto,
     perfil: perfil_nome ? { id: resto.perfil_id, nome: perfil_nome, slug: perfil_slug } : null,
+    clinica: resto.clinica_id ? { id: resto.clinica_id, nome: clinica_nome, slug: clinica_slug } : null,
   };
 };
 
@@ -604,7 +693,12 @@ app.get('/api/usuarios/me', async (req, res) => {
   const id = req.usuario?.sub;
 
   if (mysqlReady && id) {
-    const rows = await query(`${SELECT_USUARIOS} WHERE u.id = ? OR u.email = ? LIMIT 1`, [id, id]);
+    // Filtra pela clínica do token: o usuário não consegue ler o perfil de
+    // outra clínica mesmo que mande outro id.
+    const rows = await query(
+      `${SELECT_USUARIOS} WHERE u.clinica_id = ? AND (u.id = ? OR u.email = ?) LIMIT 1`,
+      [clinica(req), id, id],
+    );
     const usuario = moldarUsuario(rows[0]);
     if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
     return res.json(usuario);
@@ -647,10 +741,11 @@ app.post('/api/usuarios/login', async (req, res) => {
 });
 
 
-app.get('/api/dentistas/:id', async (_req, res) => {
-  const id = Number(_req.params.id);
+app.get('/api/dentistas/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const cid = clinica(req);
   if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM dentistas WHERE id = ? LIMIT 1', [id], demoDentistas);
+    const rows = await fetchFromDb('SELECT * FROM dentistas WHERE clinica_id = ? AND id = ? LIMIT 1', [cid, id], demoDentistas);
     const dentista = Array.isArray(rows) ? rows[0] : null;
     if (!dentista) return res.status(404).json({ error: 'Dentista não encontrado' });
     return res.json(dentista);
@@ -725,6 +820,8 @@ app.post('/api/using-mysql', (_req, res) => {
 registerCrud(app, {
   query,
   isMysqlReady: () => mysqlReady,
+  clinicaDe: (req) => req.usuario?.clinica_id,
+  auditarReq,
   dadosDemo: {
     demoPacientes,
     demoDentistas,

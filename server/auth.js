@@ -75,7 +75,16 @@ const assinar = (conteudo) => crypto.createHmac('sha256', SECRET).update(conteud
 
 export const gerarToken = (usuario, validadeHoras = 12) => {
   const exp = Date.now() + validadeHoras * 3600 * 1000;
-  const payload = base64url(JSON.stringify({ sub: usuario.id, email: usuario.email, exp }));
+  // clinica_id entra no token assinado: a API não aceita o cliente escolher
+  // a clínica, então o isolamento é aplicado no servidor e não confia no front.
+  const payload = base64url(
+    JSON.stringify({
+      sub: usuario.id,
+      email: usuario.email,
+      clinica_id: usuario.clinica_id ?? null,
+      exp,
+    }),
+  );
   return `${payload}.${assinar(payload)}`;
 };
 
