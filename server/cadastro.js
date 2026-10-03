@@ -99,6 +99,7 @@ export const registrarClinica = async (corpo) => {
     admin: { id: adminId, email, nome: nomeAdmin },
     dentistaPadrao: dentistas.insertId,
     plano,
+    preco: PLANOS[plano].preco_mensal,
   };
 };
 

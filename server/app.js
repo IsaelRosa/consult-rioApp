@@ -14,6 +14,8 @@ import { verificarLimite, PLANOS, obterPlano } from './planos.js';
 import { enviar, smtpConfigurado } from './mailer.js';
 import { solicitarRecuperacao, consumirToken, marcarUsado, VALIDADE as VALIDADE_RECOVERACAO } from './recuperacao.js';
 import { assinar, assinaturaVigente, historico, aplicarWebhook, provedorConfigurado, gerarReferencia } from './assinaturas.js';
+import { boasVindas as enviarBoasVindas, testarConfiguracao as testarEmail, urlsConfiguradas } from './emails.js';
+import { iniciarRotinas, cobrarVencimentos, suspenderInadimplentes } from './rotinas.js';
 import { gerarHashSenha, verificarSenha, precisaRehash, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
@@ -58,6 +60,17 @@ app.post(
       if (resultado.erro) return res.status(resultado.erro.status).json({ error: resultado.erro.error });
 
       console.log(`[plataforma] nova clínica #${resultado.clinica.id} — ${resultado.clinica.nome} (${resultado.plano})`);
+
+      // Boas-vindas. Não bloqueia o cadastro se falhar: a conta já existe e
+      // o cliente pode pedir o reenvio depois.
+      enviarBoasVindas({
+        nome: resultado.admin.nome,
+        email: resultado.admin.email,
+        clinica: resultado.clinica.nome,
+        plano: resultado.plano,
+        preco: resultado.preco,
+        origem: `${req.protocol}://${req.get('host')}`,
+      }).catch((erro) => console.warn('[email:boas-vindas]', erro?.message));
 
       // Devolve só o necessário para o usuário logar; nada de token aqui.
       return res.status(201).json({
@@ -173,6 +186,37 @@ app.post('/api/plataforma/webhook-pagamento', async (req, res) => {
   } catch (error) {
     console.warn('[assinatura:webhook]', error.message);
     return res.status(500).json({ error: 'Não foi possível processar o webhook.' });
+  }
+});
+
+// Diagnóstico de e-mail: o admin confere se o envio está funcionando.
+app.get('/api/plataforma/email/status', async (req, res) => {
+  res.json({ configurado: smtpConfigurado(), urls: urlsConfiguradas() });
+});
+
+app.post('/api/plataforma/email/testar', async (req, res) => {
+  const destino = String(req.body?.email || '').trim();
+  if (!destino) return res.status(400).json({ error: 'Informe o e-mail de destino.' });
+
+  const resultado = await testarEmail(destino);
+  if (!resultado.entregue) {
+    return res.status(503).json({
+      error: 'O envio não funcionou. Verifique as variáveis SMTP_* no painel.',
+      motivo: resultado.motivo,
+    });
+  }
+  return res.json({ ok: true });
+});
+
+// Dispara as rotinas na hora, sem esperar o horário agendado.
+app.post('/api/plataforma/rotinas/executar', async (_req, res) => {
+  try {
+    const avisos = await cobrarVencimentos();
+    const suspensos = await suspenderInadimplentes();
+    return res.json({ ok: true, avisos, suspensos });
+  } catch (error) {
+    console.warn('[rotinas:manual]', error.message);
+    return res.status(500).json({ error: 'As rotinas falharam. Veja o log.' });
   }
 });
 

@@ -1,4 +1,7 @@
 import { app, probeDatabase, mysqlReady } from './server/app.js';
+import { iniciarRotinas } from './server/rotinas.js';
+import { smtpConfigurado } from './server/mailer.js';
+import { urlsConfiguradas } from './server/emails.js';
 
 const host = process.env.HOST || '0.0.0.0';
 
@@ -17,7 +20,17 @@ const server = app.listen(port, host, () => {
 
 // O listen acontece primeiro; o banco é testado depois, sem travar o boot.
 probeDatabase()
-  .then(() => console.log(mysqlReady ? '📦 MySQL connected' : '🧪 Demo mode active'))
+  .then((conectado) => {
+    console.log(conectado ? '📦 MySQL connected' : '🧪 Demo mode active');
+    // Avisos de vencimento e suspensão só fazem sentido com banco.
+    if (conectado) iniciarRotinas();
+
+    // Avisos: e-mail sem APP_URL gera mensagens com link quebrado, o que
+    // só é percebido pelo cliente.
+    if (smtpConfigurado() && !urlsConfiguradas()) {
+      console.warn('[boot] SMTP ativo mas APP_URL não definida — os links dos e-mails ficarão relativos.');
+    }
+  })
   .catch((err) => console.error('[boot] falha na sonda do banco:', err));
 
 server.on('error', (err) => {

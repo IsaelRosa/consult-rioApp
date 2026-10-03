@@ -9,6 +9,7 @@
 import crypto from 'node:crypto';
 import { query } from './db.js';
 import { PLANOS, PLANO_PADRAO } from './planos.js';
+import { assinaturaAtiva as enviarAssinaturaAtiva } from './emails.js';
 
 const STATUS = {
   INATIVA: 'inativa',
@@ -115,6 +116,28 @@ export const aplicarWebhook = async (corpo, assinaturaSecreta) => {
       assinatura.id,
       assinatura.clinica_id,
     ]);
+
+    // Recibo por e-mail. Não derruba o fluxo se o envio falhar.
+    const [dados] = await query(
+      `SELECT a.plano, a.valor_mensal, c.nome AS clinica_nome,
+              u.nome AS admin_nome, u.email AS admin_email
+       FROM assinaturas a
+       JOIN clinicas c ON c.id = a.clinica_id
+       LEFT JOIN usuarios u ON u.clinica_id = a.clinica_id AND u.perfil_id = 1 AND u.ativo = 1
+       WHERE a.id = ?
+       LIMIT 1`,
+      [assinatura.id],
+    );
+
+    if (dados) {
+      enviarAssinaturaAtiva({
+        email: dados.admin_email ?? dados.clinica_nome,
+        nome: dados.admin_nome ?? 'titular',
+        clinica: dados.clinica_nome,
+        plano: dados.plano,
+        preco: dados.valor_mensal,
+      }).catch((erro) => console.warn('[email:assinatura]', erro?.message));
+    }
   } else {
     await query('UPDATE assinaturas SET status = ?, cancelada_em = ? WHERE id = ?', [
       status,
