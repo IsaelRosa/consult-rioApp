@@ -2,9 +2,11 @@ import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { query, testConnection } from './db.js';
 import { registerCrud } from './crud.js';
+import { gerarHashSenha, verificarSenha, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
   dashboardData,
@@ -32,6 +34,10 @@ export const app = express();
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+
+// Toda a API exige sessão, exceto /api/health e o login. Antes estas rotas
+// eram abertas — qualquer pessoa com a URL podia ler e alterar dados.
+app.use('/api', exigirToken);
 
 // A sonda do MySQL NÃO segura o boot. O app começa a escutar na hora e a
 // conexão é testada em segundo plano: se o banco estiver inacessível, o
@@ -233,32 +239,129 @@ app.post('/api/procedimentos-consulta', async (req, res) => {
 
 app.get('/api/dashboard', async (_req, res) => {
   if (mysqlReady) {
-    const data = await fetchFromDb(
-      `SELECT
-        (SELECT COUNT(*) FROM consultas WHERE DATE(data_hora_inicio) = CURDATE()) AS consultasHoje,
-        (SELECT COUNT(*) FROM consultas WHERE DATE(data_hora_inicio) BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE()) AS consultasSemana,
-        (SELECT COUNT(*) FROM pacientes WHERE ativo = 1) AS pacientesAtivos,
-        (SELECT COALESCE(SUM(valor), 0) FROM pagamentos WHERE status = 'pago' AND DATE(data_pagamento) BETWEEN DATE_FORMAT(CURDATE(), '%Y-%m-01') AND LAST_DAY(CURDATE())) AS faturamentoMes,
-        (SELECT COALESCE(SUM(valor), 0) FROM despesas WHERE status = 'pago' AND DATE(data_despesa) BETWEEN DATE_FORMAT(CURDATE(), '%Y-%m-01') AND LAST_DAY(CURDATE())) AS despesasMes,
-        (SELECT COALESCE((SELECT SUM(valor) FROM pagamentos WHERE status = 'pago' AND DATE(data_pagamento) BETWEEN DATE_FORMAT(CURDATE(), '%Y-%m-01') AND LAST_DAY(CURDATE())) - (SELECT SUM(valor) FROM despesas WHERE status = 'pago' AND DATE(data_despesa) BETWEEN DATE_FORMAT(CURDATE(), '%Y-%m-01') AND LAST_DAY(CURDATE())), 0)) AS saldoMes`,
+    // Cada métrica é buscada por conta própria: se uma falhar (por exemplo,
+    // a coluna `ativo` ainda não existir em `pacientes`), as outras continuam
+    // reais em vez de o painel inteiro cair nos dados de demonstração.
+    const seguro = async (sql, params, padrao) => {
+      try {
+        const linhas = await query(sql, params);
+        return Array.isArray(linhas) && linhas[0] !== undefined ? linhas[0] : padrao;
+      } catch (error) {
+        console.warn('[api:dashboard]', error.message);
+        return padrao;
+      }
+    };
+
+    const INICIO_MES = "DATE_FORMAT(CURDATE(), '%Y-%m-01')";
+    const FIM_MES = 'LAST_DAY(CURDATE())';
+
+    const consultasHoje = await seguro(
+      'SELECT COUNT(*) AS total FROM consultas WHERE DATE(data_hora_inicio) = CURDATE()',
       [],
-      dashboardData,
+      { total: 0 },
     );
 
-    const row = Array.isArray(data) && data[0] ? data[0] : dashboardData;
-    const payload = {
-      ...dashboardData,
-      consultasHoje: Number(row.consultasHoje || 0),
-      consultasSemana: Number(row.consultasSemana || 0),
-      pacientesAtivos: Number(row.pacientesAtivos || 0),
-      faturamentoMes: Number(row.faturamentoMes || 0),
-      despesasMes: Number(row.despesasMes || 0),
-      saldoMes: Number(row.saldoMes || 0),
-      consultasPorStatus: [],
-      faturamentoUltimosMeses: [],
-      proximasConsultas: demoConsultas,
-    };
-    return res.json(payload);
+    const consultasSemana = await seguro(
+      `SELECT COUNT(*) AS total FROM consultas
+       WHERE DATE(data_hora_inicio) BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE()`,
+      [],
+      { total: 0 },
+    );
+
+    // Tenta com `ativo`; se a coluna não existir (banco antigo), conta todos.
+    let pacientesAtivos;
+    try {
+      pacientesAtivos = await query('SELECT COUNT(*) AS total FROM pacientes WHERE ativo = 1');
+    } catch {
+      console.warn('[api:dashboard] coluna pacientes.ativo ausente — rode server/migrate.sql');
+      pacientesAtivos = await query('SELECT COUNT(*) AS total FROM pacientes').catch(() => []);
+    }
+
+    const faturamento = await seguro(
+      `SELECT COALESCE(SUM(valor), 0) AS total FROM pagamentos
+       WHERE status = 'pago' AND DATE(data_pagamento) BETWEEN ${INICIO_MES} AND ${FIM_MES}`,
+      [],
+      { total: 0 },
+    );
+
+    const despesas = await seguro(
+      `SELECT COALESCE(SUM(valor), 0) AS total FROM despesas
+       WHERE status = 'pago' AND DATE(data_despesa) BETWEEN ${INICIO_MES} AND ${FIM_MES}`,
+      [],
+      { total: 0 },
+    );
+
+    const status = await seguro(
+      'SELECT status, COUNT(*) AS total FROM consultas GROUP BY status',
+      [],
+      [],
+    );
+
+    const meses = await seguro(
+      `SELECT
+         DATE_FORMAT(data_pagamento, '%Y-%m') AS mes,
+         COALESCE(SUM(valor), 0) AS receitas
+       FROM pagamentos
+       WHERE status = 'pago'
+         AND data_pagamento >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+       GROUP BY mes`,
+      [],
+      [],
+    );
+
+    const despesasPorMes = await seguro(
+      `SELECT
+         DATE_FORMAT(data_despesa, '%Y-%m') AS mes,
+         COALESCE(SUM(valor), 0) AS despesas
+       FROM despesas
+       WHERE status = 'pago'
+         AND data_despesa >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+       GROUP BY mes`,
+      [],
+      [],
+    );
+
+    const proximas = await seguro(
+      `${SELECT_CONSULTAS}
+       WHERE c.data_hora_inicio >= NOW()
+         AND c.status NOT IN ('cancelado', 'concluido')
+       ORDER BY c.data_hora_inicio ASC
+       LIMIT 5`,
+      [],
+      [],
+    );
+
+    const FATURAMENTO = Number(faturamento.total || 0);
+    const DESPESAS = Number(despesas.total || 0);
+
+    // Meses faltantes entram com zero para o gráfico não ficar com buracos.
+    const meses6 = [];
+    const agora = new Date();
+    for (let i = 5; i >= 0; i -= 1) {
+      const d = new Date(agora.getFullYear(), agora.getMonth() - i, 1);
+      const chave = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const nome = d.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' });
+      const receitaMes = meses.find((m) => m.mes === chave);
+      const despesaMes = despesasPorMes.find((m) => m.mes === chave);
+      meses6.push({
+        mes: nome.charAt(0).toUpperCase() + nome.slice(1),
+        chave,
+        receitas: Number(receitaMes?.receitas || 0),
+        despesas: Number(despesaMes?.despesas || 0),
+      });
+    }
+
+    return res.json({
+      consultasHoje: Number(consultasHoje.total || 0),
+      consultasSemana: Number(consultasSemana.total || 0),
+      pacientesAtivos: Number(pacientesAtivos[0]?.total || 0),
+      faturamentoMes: FATURAMENTO,
+      despesasMes: DESPESAS,
+      saldoMes: FATURAMENTO - DESPESAS,
+      consultasPorStatus: status.map((s) => ({ status: s.status, total: Number(s.total || 0) })),
+      faturamentoUltimosMeses: meses6,
+      proximasConsultas: (Array.isArray(proximas) ? proximas : []).map(comPaciente),
+    });
   }
 
   return res.json(dashboardData);
@@ -337,19 +440,74 @@ app.get('/api/despesas', async (_req, res) => {
   return res.json(demoDespesas);
 });
 
+// ---------- Usuários ----------
+// Fora do CRUD genérico: a senha precisa ser hasheada e o id é um UUID.
+
+app.post('/api/usuarios', async (req, res) => {
+  const { nome, email, senha, perfil_id } = req.body || {};
+
+  if (!String(nome || '').trim() || !String(email || '').trim() || !String(senha || '')) {
+    return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios.' });
+  }
+  if (String(senha).length < 6) {
+    return res.status(400).json({ error: 'A senha deve ter ao menos 6 caracteres.' });
+  }
+
+  const emailNormalizado = String(email).trim().toLowerCase();
+  const id = crypto.randomUUID();
+
+  if (mysqlReady) {
+    try {
+      const existentes = await query('SELECT id FROM usuarios WHERE email = ? LIMIT 1', [emailNormalizado]);
+      if (existentes[0]) return res.status(409).json({ error: 'Já existe um usuário com este e-mail.' });
+
+      await query(
+        `INSERT INTO usuarios (id, auth_id, email, nome, perfil_id, password_hash, ativo)
+         VALUES (?, ?, ?, ?, ?, ?, TRUE)`,
+        [id, id, emailNormalizado, String(nome).trim(), Number(perfil_id) || 1, gerarHashSenha(String(senha))],
+      );
+
+      const linhas = await query(`${SELECT_USUARIOS} WHERE u.id = ? LIMIT 1`, [id]);
+      return res.status(201).json(moldarUsuario(linhas[0]));
+    } catch (error) {
+      console.warn('[api:usuarios]', error.message);
+      return res.status(500).json({ error: 'Não foi possível criar o usuário.' });
+    }
+  }
+
+  const novo = { id, email: emailNormalizado, nome: String(nome).trim(), perfil_id: Number(perfil_id) || 1, ativo: true };
+  demoUsers.push({ ...novo, password_hash: gerarHashSenha(String(senha)) });
+  return res.status(201).json(novo);
+});
+
+app.put('/api/usuarios/:id/ativo', async (req, res) => {
+  const id = req.params.id;
+  const ativo = req.body?.ativo ? 1 : 0;
+
+  if (mysqlReady) {
+    try {
+      const resultado = await query('UPDATE usuarios SET ativo = ? WHERE id = ?', [ativo, id]);
+      if (!resultado.affectedRows) return res.status(404).json({ error: 'Usuário não encontrado' });
+      const linhas = await query(`${SELECT_USUARIOS} WHERE u.id = ? LIMIT 1`, [id]);
+      return res.json(moldarUsuario(linhas[0]));
+    } catch (error) {
+      console.warn('[api:usuarios/ativo]', error.message);
+      return res.status(500).json({ error: 'Não foi possível atualizar o usuário.' });
+    }
+  }
+
+  const alvo = demoUsers.find((u) => String(u.id) === String(id));
+  if (!alvo) return res.status(404).json({ error: 'Usuário não encontrado' });
+  alvo.ativo = Boolean(ativo);
+  return res.json(alvo);
+});
+
 app.get('/api/usuarios', async (_req, res) => {
   if (mysqlReady) {
-    const rows = await fetchFromDb(
-      `SELECT u.*, p.nome AS perfil_nome, p.slug AS perfil_slug
-       FROM usuarios u
-       LEFT JOIN perfis p ON p.id = u.perfil_id
-       ORDER BY u.nome`,
-      [],
-      demoUsers,
-    );
-    return res.json(rows);
+    const rows = await fetchFromDb(`${SELECT_USUARIOS} ORDER BY u.nome`, [], []);
+    return res.json(rows.map(moldarUsuario));
   }
-  return res.json(demoUsers);
+  return res.json(demoUsers.map(({ password_hash, ...u }) => u));
 });
 
 app.get('/api/odontograma', async (_req, res) => {
@@ -368,52 +526,86 @@ app.get('/api/odontograma', async (_req, res) => {
   return res.json(data);
 });
 
-app.get('/api/usuarios/me', async (_req, res) => {
-  const authId = _req.query.auth_id || 'demo-admin';
+// Usuário da sessão atual, resolvido pelo token (id em `req.usuario`).
+const SELECT_USUARIOS = `
+  SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo,
+         p.nome AS perfil_nome, p.slug AS perfil_slug
+  FROM usuarios u
+  LEFT JOIN perfis p ON p.id = u.perfil_id
+`;
 
-  if (mysqlReady) {
-    const rows = await fetchFromDb(
-      `SELECT u.*, p.nome AS perfil_nome, p.slug AS perfil_slug
-       FROM usuarios u
-       LEFT JOIN perfis p ON p.id = u.perfil_id
-       WHERE u.auth_id = ? OR u.email = ? LIMIT 1`,
-      [authId, authId],
-      demoUsers,
-    );
-    const match = Array.isArray(rows) ? rows[0] : null;
-    if (!match) return res.status(404).json({ error: 'Usuário não encontrado' });
-    return res.json(match);
+const moldarUsuario = (linha) => {
+  if (!linha) return null;
+  const { perfil_nome, perfil_slug, password_hash, ...resto } = linha;
+  return {
+    ...resto,
+    perfil: perfil_nome ? { id: resto.perfil_id, nome: perfil_nome, slug: perfil_slug } : null,
+  };
+};
+
+app.get('/api/usuarios/me', async (req, res) => {
+  const id = req.usuario?.sub;
+
+  if (mysqlReady && id) {
+    const rows = await query(`${SELECT_USUARIOS} WHERE u.id = ? OR u.email = ? LIMIT 1`, [id, id]);
+    const usuario = moldarUsuario(rows[0]);
+    if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
+    return res.json(usuario);
   }
 
-  const match = demoUsers.find((usuario) => usuario.auth_id === authId || usuario.email === authId);
+  const match = demoUsers.find((u) => u.id === id || u.email === id) ?? null;
   if (!match) return res.status(404).json({ error: 'Usuário não encontrado' });
   return res.json(match);
 });
 
-app.post('/api/usuarios/login', async (_req, res) => {
-  const { email, password } = _req.body || {};
+// Login local contra a tabela usuarios (mais a sessão de demonstração,
+// para o app continuar utilizável sem banco configurado).
+app.post('/api/usuarios/login', async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const senha = String(req.body?.password || '');
+
+  if (!email || !senha) return res.status(400).json({ error: 'E-mail e senha são obrigatórios.' });
 
   if (mysqlReady) {
-    const rows = await fetchFromDb(
-      `SELECT u.*, p.slug AS perfil_slug, p.nome AS perfil_nome
-       FROM usuarios u
-       LEFT JOIN perfis p ON p.id = u.perfil_id
-       WHERE u.email = ? AND u.ativo = 1 LIMIT 1`,
-      [email],
-      demoUsers,
-    );
-    const user = Array.isArray(rows) ? rows[0] : null;
-    if (!user || user.password_hash !== String(password)) {
-      return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+    try {
+      const rows = await query(
+        `SELECT u.id, u.email, u.nome, u.perfil_id, u.ativo, u.password_hash,
+                p.nome AS perfil_nome, p.slug AS perfil_slug
+         FROM usuarios u
+         LEFT JOIN perfis p ON p.id = u.perfil_id
+         WHERE u.email = ? LIMIT 1`,
+        [email],
+      );
+
+      const linha = rows[0];
+
+      if (!linha || !linha.ativo || !verificarSenha(senha, linha.password_hash)) {
+        return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+      }
+
+      // Senha veio do seed em texto puro: re-hasheia agora (upgrade gradual).
+      if (precisaRehash(linha.password_hash)) {
+        const novoHash = gerarHashSenha(senha);
+        await query('UPDATE usuarios SET password_hash = ? WHERE id = ?', [novoHash, linha.id]);
+        console.log(`[auth] senha do usuário ${email} migrada para scrypt`);
+      }
+
+      return res.json({ user: moldarUsuario(linha), token: gerarToken(linha) });
+    } catch (error) {
+      console.warn('[auth:login]', error.message);
+      return res.status(500).json({ error: 'Falha ao autenticar.' });
     }
-    return res.json({ user, token: 'mysql-token' });
   }
 
-  const user = demoUsers.find((item) => item.email === email && password === '123456');
+  // Modo demo: as contas do seed não têm hash; as criadas pela API têm.
+  const demo = demoUsers.find((u) => u.email === email && u.ativo !== false);
+  if (!demo) return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
 
-  if (!user) return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+  const senhaConfere = demo.password_hash ? verificarSenha(senha, demo.password_hash) : senha === '123456';
+  if (!senhaConfere) return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
 
-  return res.json({ user, token: 'demo-token' });
+  const { password_hash, ...usuarioLimpo } = demo;
+  return res.json({ user: usuarioLimpo, token: gerarToken(demo) });
 });
 
 

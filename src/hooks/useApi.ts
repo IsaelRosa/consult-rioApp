@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import supabase from '../lib/supabase';
+import { lerToken } from '../contexts/AuthContext';
 
 const rawBaseUrl = (import.meta.env.VITE_API_URL || '').trim();
 
@@ -79,8 +79,7 @@ export function useApi<T>(url: string | null, deps: unknown[] = []): UseApiResul
     setLoading(true);
     setError(null);
     try {
-      const session = await supabase.auth.getSession();
-      const token = session.data.session?.access_token;
+      const token = lerToken();
       const resolvedUrl = resolveApiUrl(url);
       const res = await fetch(resolvedUrl, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -119,7 +118,7 @@ export async function apiFetch<T = unknown>(
   url: string,
   options?: RequestInit & { requireAuth?: boolean }
 ): Promise<T> {
-  const token = (await supabase.auth.getSession()).data.session?.access_token;
+  const token = lerToken();
   const resolvedUrl = resolveApiUrl(url);
   const res = await fetch(resolvedUrl, {
     ...options,
@@ -129,6 +128,11 @@ export async function apiFetch<T = unknown>(
       ...options?.headers,
     },
   });
+
+  // Sessão expirada: limpa o token para o AuthContext cair no login.
+  if (res.status === 401 && !url.includes('/usuarios/login')) {
+    window.localStorage.removeItem('odonto-session');
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Erro ${res.status}: ${text}`);

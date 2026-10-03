@@ -13,7 +13,6 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.99.1",
     "@tailwindcss/vite": "^4.2.1",
     "cors": "^2.8.6",
     "dotenv": "^18.0.5",
