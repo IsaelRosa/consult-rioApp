@@ -1,9 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import supabase from '../lib/supabase';
 
-const apiBaseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const rawBaseUrl = (import.meta.env.VITE_API_URL || '').trim();
+
+// Em produção a API é servida pelo mesmo Express que entrega o front
+// (rotas /api no mesmo domínio). Se VITE_API_URL apontar para localhost,
+// isso só funciona na máquina do dev — nunca no navegador do visitante.
+const isLocalhostBase = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/i.test(rawBaseUrl);
+
+// Deixa a base sem o sufixo /api para não gerar /api/api/...
+const apiBaseUrl = isLocalhostBase ? '' : rawBaseUrl.replace(/\/+$/, '').replace(/\/api$/, '');
 
 const resolveApiUrl = (url: string) => {
+  if (/^https?:\/\//i.test(url)) return url;
   if (!url.startsWith('/')) return url;
   if (!apiBaseUrl) return url;
   return `${apiBaseUrl}${url}`;
