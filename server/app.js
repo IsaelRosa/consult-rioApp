@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { query, testConnection } from './db.js';
+import { registerCrud } from './crud.js';
 import {
   dashboardData,
   demoConsultas,
@@ -326,6 +327,24 @@ app.post('/api/using-mysql', (_req, res) => {
   });
 });
 
+// ---------- Rotas de escrita (POST/PUT/DELETE) ----------
+// Precisa vir antes do fallback SPA, senão as rotas /api caem nele.
+registerCrud(app, {
+  query,
+  isMysqlReady: () => mysqlReady,
+  dadosDemo: {
+    demoPacientes,
+    demoDentistas,
+    demoConsultas,
+    demoOrcamentos,
+    demoPagamentos,
+    demoDespesas,
+    demoOdontograma,
+    demoProcedimentos,
+    demoTratamentos,
+  },
+});
+
 // ---------- Front-end (Vite build) ----------
 const indexHtml = path.join(DIST, 'index.html');
 
@@ -345,6 +364,9 @@ app.get(/^\/(?!api\/).*/, (_req, res, next) => {
 app.use((_req, res) => res.status(404).json({ error: 'Rota não encontrada' }));
 
 app.use((err, _req, res, _next) => {
-  console.error('[api:error]', err);
-  res.status(500).json({ error: 'Erro interno do servidor' });
+  // erros de parse do body já trazem um status (ex.: 400); não mascarar como 500
+  const status = Number(err?.status || err?.statusCode) || 500;
+  if (status >= 500) console.error('[api:error]', err);
+  else console.warn('[api] requisição inválida:', err?.message);
+  res.status(status).json({ error: status >= 500 ? 'Erro interno do servidor' : 'Requisição inválida.' });
 });
