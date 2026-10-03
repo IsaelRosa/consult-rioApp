@@ -113,7 +113,14 @@ export const lerToken = (token) => {
 export const exigirToken = (req, res, next) => {
   const caminho = req.path;
 
-  const publicas = ['/health', '/usuarios/login', '/plataforma/registrar', '/plataforma/planos'];
+  const publicas = [
+    '/health',
+    '/usuarios/login',
+    '/plataforma/registrar',
+    '/plataforma/planos',
+    '/plataforma/recuperar-senha',
+    '/plataforma/redefinir-senha',
+  ];
   if (publicas.includes(caminho) || caminho.startsWith('/plataforma/')) return next();
 
   const cabecalho = req.headers.authorization || '';

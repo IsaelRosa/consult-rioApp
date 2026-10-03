@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Smile, Loader2, Mail, Lock, ArrowRight } from 'lucide-react';
 
@@ -73,6 +73,18 @@ export default function Login() {
             Entrar
           </button>
         </form>
+
+        <div className="mt-5 space-y-3 text-center text-sm">
+          <Link to="/recuperar-senha" className="block text-sky-600 hover:text-sky-700">
+            Esqueci minha senha
+          </Link>
+          <p className="text-slate-400">
+            Ainda não tem conta?{' '}
+            <Link to="/cadastro" className="font-medium text-sky-600 hover:text-sky-700">
+              Criar conta da clínica
+            </Link>
+          </p>
+        </div>
 
         <p className="mt-6 text-center text-xs text-slate-400">
           Contas demo: admin@odonto.com, recep@odonto.com, dentista@odonto.com, financeiro@odonto.com<br />

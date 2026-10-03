@@ -118,7 +118,25 @@ UPDATE odontograma           SET clinica_id = 1 WHERE clinica_id IS NULL;
 -- ---------------------------------------------------------------------------
 -- 5. NOT NULL + chaves estrangeiras
 -- ---------------------------------------------------------------------------
-ALTER TABLE usuarios        MODIFY clinica_id INT NOT NULL DEFAULT 1;
+-- ---------------------------------------------------------------------------
+-- 6. Recuperação de senha
+-- ---------------------------------------------------------------------------
+-- Guarda apenas o SHA-256 do token: se o banco vazar, os tokens não são
+-- recuperáveis por quem leu a tabela.
+CREATE TABLE IF NOT EXISTS tokens_recuperacao (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  usuario_id CHAR(36) NOT NULL,
+  token_hash CHAR(64) NOT NULL,
+  expira_em DATETIME NOT NULL,
+  tentativas INT NOT NULL DEFAULT 0,
+  usado_em DATETIME NULL,
+  criado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_token_hash (token_hash),
+  INDEX idx_recuperacao_usuario (usuario_id),
+  CONSTRAINT fk_recuperacao_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
 ALTER TABLE pacientes       MODIFY clinica_id INT NOT NULL DEFAULT 1;
 ALTER TABLE dentistas       MODIFY clinica_id INT NOT NULL DEFAULT 1;
 ALTER TABLE procedimentos   MODIFY clinica_id INT NOT NULL DEFAULT 1;
@@ -190,11 +208,11 @@ SET @s := IF(@fk = 0,
 PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
 
 -- ---------------------------------------------------------------------------
--- 6. Revogação de sessão (token_version)
+-- 7. Revogação de sessão (token_version)
 -- ---------------------------------------------------------------------------
 -- Incrementar token_version invalida todos os tokens emitidos antes: é o que
--- faz o "sair de todos os dispositivos" e a revogação pelo admin funcionarem
--- mesmo com token sem estado no servidor.
+-- faz o logout, o "sair de todos os dispositivos" e a redefinição de senha
+-- derrubarem sessões já abertas.
 SET @tem_tv := (SELECT COUNT(*) FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
                   AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'token_version');

@@ -11,6 +11,8 @@ import { TENANT_TABLES } from './tenant.js';
 import { limite } from './ratelimit.js';
 import { registrarClinica } from './cadastro.js';
 import { verificarLimite, PLANOS, obterPlano } from './planos.js';
+import { enviar, smtpConfigurado } from './mailer.js';
+import { solicitarRecuperacao, consumirToken, marcarUsado, VALIDADE as VALIDADE_RECOVERACAO } from './recuperacao.js';
 import { gerarHashSenha, verificarSenha, precisaRehash, gerarToken, exigirToken } from './auth.js';
 import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
@@ -80,6 +82,82 @@ app.get('/api/plataforma/planos', (_req, res) => {
     recursos,
   })));
 });
+
+app.post(
+  '/api/plataforma/recuperar-senha',
+  limite({ janelaMs: 900_000, max: 5, mensagem: 'Muitas tentativas. Aguarde alguns minutos.' }),
+  async (req, res) => {
+    if (!mysqlReady) return res.status(503).json({ error: 'Indisponível no momento.' });
+
+    try {
+      const resultado = await solicitarRecuperacao(req.body?.email);
+      const origem = req.headers.origin || `${req.protocol}://${req.get('host')}`;
+      const link = resultado.criado ? `${origem}/redefinir-senha?token=${resultado.token}` : null;
+
+      if (resultado.criado) {
+        const envio = await enviar({
+          para: resultado.email,
+          assunto: 'Redefinição de senha',
+          texto: [
+            `Olá, ${resultado.nome}.`,
+            '',
+            'Recebemos um pedido para redefinir a senha da sua conta.',
+            `Use o link abaixo em até ${VALIDADE_RECOVERACAO} horas:`,
+            link,
+            '',
+            'Se não foi você, ignore esta mensagem: nada muda na sua conta.',
+          ].join('\n'),
+        });
+
+        // Sem SMTP não há como entregar o link. Dizer isso é melhor que
+        // fingir que o e-mail foi enviado.
+        if (!envio.entregue) {
+          return res.status(503).json({
+            error: 'O envio de e-mail está indisponível. Fale com o suporte para redefinir sua senha.',
+          });
+        }
+      }
+
+      // Resposta idêntica exista ou não a conta.
+      return res.json({ ok: true, mensagem: 'Se o e-mail existir, você receberá o link em instantes.' });
+    } catch (error) {
+      console.warn('[recuperacao]', error.message);
+      return res.status(500).json({ error: 'Não foi possível processar o pedido.' });
+    }
+  },
+);
+
+app.post(
+  '/api/plataforma/redefinir-senha',
+  limite({ janelaMs: 900_000, max: 10, mensagem: 'Muitas tentativas. Aguarde alguns minutos.' }),
+  async (req, res) => {
+    if (!mysqlReady) return res.status(503).json({ error: 'Indisponível no momento.' });
+
+    const { token, senha } = req.body || {};
+
+    try {
+      const { registro, erro } = await consumirToken(token, senha);
+      if (erro) return res.status(erro.status).json({ error: erro.error });
+
+      await query('UPDATE usuarios SET password_hash = ? WHERE id = ?', [
+        gerarHashSenha(String(senha)),
+        registro.usuario_id,
+      ]);
+
+      // Invalida sessões abertas: quem esqueceu a senha pode estar com o
+      // antigo token em outro dispositivo.
+      await query('UPDATE usuarios SET token_version = token_version + 1 WHERE id = ?', [registro.usuario_id]);
+      await marcarUsado(registro.id);
+
+      console.log(`[recuperacao] senha redefinida para o usuário ${registro.usuario_id}`);
+      return res.json({ ok: true });
+    } catch (error) {
+      console.warn('[recuperacao:redefinir]', error.message);
+      const mapeado = erroDeBanco(error);
+      return res.status(mapeado.status).json({ error: mapeado.error });
+    }
+  },
+);
 
 app.use('/api', exigirToken);
 

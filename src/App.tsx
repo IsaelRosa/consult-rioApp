@@ -15,6 +15,8 @@ import Pagamentos from './pages/Pagamentos';
 import Financeiro from './pages/Financeiro';
 import Relatorios from './pages/Relatorios';
 import Usuarios from './pages/Usuarios';
+import Cadastro from './pages/Cadastro';
+import RecuperarSenha from './pages/RecuperarSenha';
 
 function App() {
   return (
@@ -22,6 +24,9 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/cadastro" element={<Cadastro />} />
+          <Route path="/recuperar-senha" element={<RecuperarSenha />} />
+          <Route path="/redefinir-senha" element={<RecuperarSenha />} />
           <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/pacientes" element={<ProtectedRoute permissao="pacientes"><Pacientes /></ProtectedRoute>} />
