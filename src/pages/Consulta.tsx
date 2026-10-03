@@ -18,6 +18,30 @@ export default function ConsultaPage() {
   const [saving, setSaving] = useState(false);
   const [addProcOpen, setAddProcOpen] = useState(false);
   const [procForm, setProcForm] = useState({ procedimento_id: 0, dente: '', quantidade: 1, valor_cobrado: 0 });
+  const [newProcOpen, setNewProcOpen] = useState(false);
+  const [procError, setProcError] = useState('');
+  const [newProc, setNewProc] = useState({ nome: '', categoria: '', valor_padrao: 0, tempo_estimado_min: 30 });
+
+  const { data: catalogo = [], refetch: refetchCatalogo } = useApi<Procedimento[]>('/api/procedimentos');
+  const catalogoAtivo = (catalogo.length ? catalogo : procedimentos).filter((p) => p.ativo);
+
+  const salvarNovoProcedimento = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProc.nome.trim()) return setProcError('Informe o nome do procedimento.');
+    try {
+      const criado = await apiFetch<Procedimento>('/api/procedimentos', {
+        method: 'POST',
+        body: JSON.stringify({ ...newProc, ativo: true }),
+      });
+      await refetchCatalogo();
+      setProcForm((f) => ({ ...f, procedimento_id: criado.id, valor_cobrado: criado.valor_padrao || 0 }));
+      setNewProc({ nome: '', categoria: '', valor_padrao: 0, tempo_estimado_min: 30 });
+      setNewProcOpen(false);
+      setProcError('');
+    } catch (err) {
+      setProcError(err instanceof Error ? err.message : 'Erro ao cadastrar procedimento');
+    }
+  };
 
   if (loading) return <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-sky-600" /></div>;
   if (error || !consulta) return <div className="rounded-xl bg-red-50 p-6 text-red-700"><AlertCircle className="mb-2 h-6 w-6" />{error || 'Consulta não encontrada'}</div>;
@@ -34,20 +58,24 @@ export default function ConsultaPage() {
 
   const adicionarProcedimento = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!procForm.procedimento_id || !consulta.paciente_id || !consulta.dentista_id) return;
+    if (!procForm.procedimento_id) return setProcError('Selecione um procedimento.');
     try {
       await apiFetch('/api/procedimentos-consulta', {
         method: 'POST',
         body: JSON.stringify({
           consulta_id: consulta.id,
-          paciente_id: consulta.paciente_id,
-          dentista_id: consulta.dentista_id,
-          ...procForm,
+          procedimento_id: procForm.procedimento_id,
+          dente: procForm.dente,
+          quantidade: procForm.quantidade,
+          valor_cobrado: procForm.valor_cobrado,
         }),
       });
       setAddProcOpen(false);
+      setProcError('');
       refetch();
-    } catch (err) { alert(err instanceof Error ? err.message : 'Erro'); }
+    } catch (err) {
+      setProcError(err instanceof Error ? err.message : 'Não foi possível lançar o procedimento.');
+    }
   };
 
   return (
@@ -83,11 +111,11 @@ export default function ConsultaPage() {
                 <thead className="bg-slate-50 text-slate-600"><tr><th className="px-3 py-2">Procedimento</th><th className="px-3 py-2">Dente</th><th className="px-3 py-2">Qtd</th><th className="px-3 py-2 text-right">Valor</th></tr></thead>
                 <tbody className="divide-y">
                   {(consulta as unknown as { procedimentos: { id: number; procedimento?: Procedimento; dente?: string; quantidade: number; valor_cobrado: number }[] }).procedimentos.map((p) => (
-                    <tr key={p.id}><td className="px-3 py-2">{p.procedimento?.nome}</td><td className="px-3 py-2">{p.dente || '-'}</td><td className="px-3 py-2">{p.quantidade}</td><td className="px-3 py-2 text-right">{moeda(p.valor_cobrado)}</td></tr>
+                    <tr key={p.id}><td className="px-3 py-2">{p.procedimento?.nome || 'Procedimento'}</td><td className="px-3 py-2">{p.dente || '-'}</td><td className="px-3 py-2">{p.quantidade}</td><td className="px-3 py-2 text-right">{moeda(p.valor_cobrado)}</td></tr>
                   ))}
                 </tbody>
               </table>
-            ) : <p className="text-sm text-slate-400">Nenhum procedimento registrado.</p>}
+            ) : <p className="text-sm text-slate-400">Nenhum procedimento registrado. Use o botão "+ Procedimento" para lançar.</p>}
           </div>
         </div>
 
@@ -128,17 +156,33 @@ export default function ConsultaPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
             <div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-bold text-slate-900">Adicionar procedimento</h2><button onClick={() => setAddProcOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
+            {procError && <div className="mb-4 flex items-start gap-2 rounded-lg bg-red-50 p-3 text-sm text-red-600"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{procError}</div>}
             <form onSubmit={adicionarProcedimento} className="space-y-4">
               <div><label className="mb-1 block text-sm font-medium text-slate-700">Procedimento</label>
-                <select value={procForm.procedimento_id} onChange={(e) => {
-                  const pid = Number(e.target.value);
-                  const p = procedimentos.find((x) => x.id === pid);
-                  setProcForm({ ...procForm, procedimento_id: pid, valor_cobrado: p?.valor_padrao || 0 });
-                }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm focus:border-sky-500 focus:outline-none">
-                  <option value="0">Selecione</option>
-                  {procedimentos.filter(p => p.ativo).map((p) => <option key={p.id} value={p.id}>{p.nome} - {moeda(p.valor_padrao || 0)}</option>)}
-                </select>
+                <div className="flex gap-2">
+                  <select value={procForm.procedimento_id} onChange={(e) => {
+                    const pid = Number(e.target.value);
+                    const p = catalogoAtivo.find((x) => x.id === pid);
+                    setProcForm({ ...procForm, procedimento_id: pid, valor_cobrado: p?.valor_padrao || 0 });
+                  }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm focus:border-sky-500 focus:outline-none">
+                    <option value="0">Selecione</option>
+                    {catalogoAtivo.map((p) => <option key={p.id} value={p.id}>{p.nome} - {moeda(p.valor_padrao || 0)}</option>)}
+                  </select>
+                  <button type="button" onClick={() => { setNewProcOpen(!newProcOpen); setProcError(''); }} className="shrink-0 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="Cadastrar novo procedimento">+ Novo</button>
+                </div>
               </div>
+              {newProcOpen && (
+                <div className="space-y-3 rounded-xl border border-sky-100 bg-sky-50/50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-sky-700">Novo procedimento</p>
+                  <div><input value={newProc.nome} onChange={(e) => setNewProc({ ...newProc, nome: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="Nome do procedimento" /></div>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div><input value={newProc.categoria} onChange={(e) => setNewProc({ ...newProc, categoria: e.target.value })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="Categoria" /></div>
+                    <div><input type="number" step="0.01" min="0" value={newProc.valor_padrao} onChange={(e) => setNewProc({ ...newProc, valor_padrao: Number(e.target.value) })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="Valor" /></div>
+                    <div><input type="number" min="5" value={newProc.tempo_estimado_min} onChange={(e) => setNewProc({ ...newProc, tempo_estimado_min: Number(e.target.value) })} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="Min" /></div>
+                  </div>
+                  <button type="button" onClick={salvarNovoProcedimento} className="w-full rounded-lg bg-sky-600 py-2 text-sm font-semibold text-white hover:bg-sky-700">Cadastrar e selecionar</button>
+                </div>
+              )}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div><label className="mb-1 block text-sm font-medium text-slate-700">Dente(s)</label><input value={procForm.dente} onChange={(e) => setProcForm({ ...procForm, dente: e.target.value })} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="ex: 36, 37" /></div>
                 <div><label className="mb-1 block text-sm font-medium text-slate-700">Qtd</label><input type="number" min={1} value={procForm.quantidade} onChange={(e) => setProcForm({ ...procForm, quantidade: Number(e.target.value) })} className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" /></div>

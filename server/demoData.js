@@ -55,9 +55,47 @@ export const demoDentistas = [
 ];
 
 export const demoProcedimentos = [
-  { id: 1, nome: 'Limpeza', codigo: 'LIM', categoria: 'Higiene', valor_padrao: 120, tempo_estimado_min: 30, ativo: true },
-  { id: 2, nome: 'Restauração', codigo: 'RES', categoria: 'Odontologia', valor_padrao: 220, tempo_estimado_min: 45, ativo: true },
-  { id: 3, nome: 'Canal', codigo: 'CAN', categoria: 'Endodontia', valor_padrao: 680, tempo_estimado_min: 75, ativo: true },
+  // Higiene / prevention
+  { id: 1, nome: 'Limpeza (Profilaxia)', codigo: 'LIM', categoria: 'Higiene', valor_padrao: 120, tempo_estimado_min: 30, ativo: true },
+  { id: 2, nome: 'Restauração em resina', codigo: 'RES', categoria: 'Odontologia', valor_padrao: 220, tempo_estimado_min: 45, ativo: true },
+  { id: 3, nome: 'Tratamento de canal', codigo: 'CAN', categoria: 'Endodontia', valor_padrao: 680, tempo_estimado_min: 75, ativo: true },
+  { id: 4, nome: 'Raspagem periodontal', codigo: 'RAS', categoria: 'Higiene', valor_padrao: 180, tempo_estimado_min: 40, ativo: true },
+  { id: 5, nome: 'Aplicação de flúor', codigo: 'FLU', categoria: 'Higiene', valor_padrao: 80, tempo_estimado_min: 20, ativo: true },
+  { id: 6, nome: 'Selante de fossas', codigo: 'SEL', categoria: 'Odontologia', valor_padrao: 90, tempo_estimado_min: 25, ativo: true },
+
+  // Odontologia geral
+  { id: 7, nome: 'Restauração em amalgama', codigo: 'AMA', categoria: 'Odontologia', valor_padrao: 160, tempo_estimado_min: 40, ativo: true },
+  { id: 8, nome: 'Obturação', codigo: 'OBT', categoria: 'Endodontia', valor_padrao: 320, tempo_estimado_min: 60, ativo: true },
+  { id: 9, nome: 'Tratamento de canal (molar)', codigo: 'CANM', categoria: 'Endodontia', valor_padrao: 980, tempo_estimado_min: 110, ativo: true },
+  { id: 10, nome: 'Cunha de cerâmica (endodôntica)', codigo: 'CU1', categoria: 'Endodontia', valor_padrao: 450, tempo_estimado_min: 60, ativo: true },
+
+  // Cirurgia
+  { id: 11, nome: 'Extração simples', codigo: 'EXS', categoria: 'Cirurgia', valor_padrao: 180, tempo_estimado_min: 30, ativo: true },
+  { id: 12, nome: 'Extração cirúrgica', codigo: 'EXC', categoria: 'Cirurgia', valor_padrao: 420, tempo_estimado_min: 60, ativo: true },
+  { id: 13, nome: 'Extração de siso incluso', codigo: 'EXI', categoria: 'Cirurgia', valor_padrao: 650, tempo_estimado_min: 90, ativo: true },
+
+  // Periodontia
+  { id: 14, nome: 'Cirurgia periodontal', codigo: 'PER', categoria: 'Periodontia', valor_padrao: 780, tempo_estimado_min: 90, ativo: true },
+  { id: 15, nome: 'Curetagem', codigo: 'CUR', categoria: 'Periodontia', valor_padrao: 260, tempo_estimado_min: 40, ativo: true },
+
+  // Prótese
+  { id: 16, nome: 'Coroa em porcelana', codigo: 'COR', categoria: 'Prótese', valor_padrao: 1250, tempo_estimado_min: 120, ativo: true },
+  { id: 17, nome: 'Prótese fixa (3 dentes)', codigo: 'PF3', categoria: 'Prótese', valor_padrao: 3400, tempo_estimado_min: 180, ativo: true },
+  { id: 18, nome: 'Prótese total (dentadura)', codigo: 'PTD', categoria: 'Prótese', valor_padrao: 2900, tempo_estimado_min: 150, ativo: true },
+  { id: 19, nome: 'Prótese parcial removível', codigo: 'PPR', categoria: 'Prótese', valor_padrao: 1600, tempo_estimado_min: 120, ativo: true },
+
+  // Ortodontia
+  { id: 20, nome: 'Instalação de aparelho ortodôntico', codigo: 'ORT', categoria: 'Ortodontia', valor_padrao: 2800, tempo_estimado_min: 120, ativo: true },
+  { id: 21, nome: 'Manutenção ortodôntica', codigo: 'MNT', categoria: 'Ortodontia', valor_padrao: 180, tempo_estimado_min: 30, ativo: true },
+  { id: 22, nome: 'Retirada de aparelho', codigo: 'RTO', categoria: 'Ortodontia', valor_padrao: 220, tempo_estimado_min: 45, ativo: true },
+
+  // Odontopediatria e estética
+  { id: 23, nome: 'Atendimento infantil', codigo: 'INF', categoria: 'Odontopediatria', valor_padrao: 150, tempo_estimado_min: 30, ativo: true },
+  { id: 24, nome: 'Clareamento dentário', codigo: 'CLA', categoria: 'Estética', valor_padrao: 650, tempo_estimado_min: 75, ativo: true },
+  { id: 25, nome: 'Faceta de porcelana', codigo: 'FAC', categoria: 'Estética', valor_padrao: 1800, tempo_estimado_min: 120, ativo: true },
+  { id: 26, nome: 'Contorno adicionado em resina', codigo: 'CAR', categoria: 'Estética', valor_padrao: 380, tempo_estimado_min: 60, ativo: true },
+  { id: 27, nome: 'Consulta de avaliação', codigo: 'AVS', categoria: 'Consulta', valor_padrao: 0, tempo_estimado_min: 20, ativo: true },
+  { id: 28, nome: 'Radiografia panorâmica', codigo: 'RXS', categoria: 'Diagnóstico', valor_padrao: 140, tempo_estimado_min: 15, ativo: true },
 ];
 
 export const demoConsultas = [

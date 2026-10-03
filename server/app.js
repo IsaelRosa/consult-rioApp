@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { query, testConnection } from './db.js';
 import { registerCrud } from './crud.js';
+import { demoConsultaProcedimentos } from './consultaProcedimentos.js';
 import {
   dashboardData,
   demoConsultas,
@@ -64,6 +65,172 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, mysql: mysqlReady, mode: mysqlReady ? 'mysql' : 'demo' });
 });
 
+// ---------- Consultas: paciente e dentista embutidos ----------
+// O front (Agenda e tela de Consulta) lê `consulta.paciente.nome`. Sem o
+// join, o nome aparece em branco — especialmente em registros criados
+// via POST, que vêm como linha crua.
+
+const SELECT_CONSULTAS = `
+  SELECT c.*,
+         p.nome AS paciente_nome, p.telefone AS paciente_telefone,
+         p.email AS paciente_email, p.convenio AS paciente_convenio,
+         p.cpf AS paciente_cpf, p.data_nascimento AS paciente_data_nascimento,
+         d.nome AS dentista_nome, d.cro AS dentista_cro
+  FROM consultas c
+  LEFT JOIN pacientes p ON p.id = c.paciente_id
+  LEFT JOIN dentistas d ON d.id = c.dentista_id
+`;
+
+// Achata as colunas do join em objetos `paciente` / `dentista`.
+const comPaciente = (linha) => {
+  const { paciente_nome, paciente_telefone, paciente_email, paciente_convenio, paciente_cpf, paciente_data_nascimento, dentista_nome, dentista_cro, ...resto } = linha;
+
+  return {
+    ...resto,
+    paciente: paciente_nome
+      ? {
+          id: resto.paciente_id,
+          nome: paciente_nome,
+          telefone: paciente_telefone,
+          email: paciente_email,
+          convenio: paciente_convenio,
+          cpf: paciente_cpf,
+          data_nascimento: paciente_data_nascimento,
+        }
+      : null,
+    dentista: dentista_nome
+      ? { id: resto.dentista_id, nome: dentista_nome, cro: dentista_cro }
+      : null,
+  };
+};
+
+// No modo demo, as linhas podem já vir sem `paciente` (ex.: as do seed),
+// então preenchemos por lookup em vez de depender do join do MySQL.
+const enriquecerDemo = (consulta) => {
+  const paciente = consulta.paciente ?? demoPacientes.find((p) => Number(p.id) === Number(consulta.paciente_id));
+  const dentista = consulta.dentista ?? demoDentistas.find((d) => Number(d.id) === Number(consulta.dentista_id));
+  return {
+    ...consulta,
+    paciente: paciente ?? null,
+    dentista: dentista ?? null,
+    procedimentos: consulta.procedimentos ?? demoConsultaProcedimentos
+      .filter((cp) => Number(cp.consulta_id) === Number(consulta.id))
+      .map((cp) => ({
+        ...cp,
+        procedimento: demoProcedimentos.find((p) => Number(p.id) === Number(cp.procedimento_id)) ?? null,
+      })),
+  };
+};
+
+const comProcedimentos = async (consulta) => {
+  if (!consulta) return consulta;
+  if (consulta.procedimentos?.length) return consulta;
+
+  if (mysqlReady) {
+    try {
+      const linhas = await query(
+        `SELECT cp.*, pr.nome AS procedimento_nome, pr.codigo AS procedimento_codigo,
+                pr.categoria AS procedimento_categoria, pr.valor_padrao AS procedimento_valor_padrao
+         FROM consulta_procedimentos cp
+         LEFT JOIN procedimentos pr ON pr.id = cp.procedimento_id
+         WHERE cp.consulta_id = ?
+         ORDER BY cp.id`,
+        [consulta.id],
+      );
+      return {
+        ...consulta,
+        procedimentos: linhas.map(({ procedimento_nome, procedimento_codigo, procedimento_categoria, procedimento_valor_padrao, ...cp }) => ({
+          ...cp,
+          procedimento: procedimento_nome
+            ? { id: cp.procedimento_id, nome: procedimento_nome, codigo: procedimento_codigo, categoria: procedimento_categoria, valor_padrao: procedimento_valor_padrao }
+            : null,
+        })),
+      };
+    } catch (error) {
+      console.warn('[api:consultas] procedimentos:', error.message);
+    }
+  }
+
+  return enriquecerDemo(consulta);
+};
+
+app.get('/api/consultas', async (_req, res) => {
+  const pacienteId = Number(_req.query.paciente_id || 0);
+
+  if (mysqlReady) {
+    const linhas = await fetchFromDb(
+      pacienteId
+        ? `${SELECT_CONSULTAS} WHERE c.paciente_id = ? ORDER BY c.data_hora_inicio ASC`
+        : `${SELECT_CONSULTAS} ORDER BY c.data_hora_inicio ASC`,
+      pacienteId ? [pacienteId] : [],
+      demoConsultas,
+    );
+    return res.json(linhas.map(comPaciente));
+  }
+
+  const lista = pacienteId
+    ? demoConsultas.filter((item) => Number(item.paciente_id) === pacienteId)
+    : demoConsultas;
+  return res.json(lista.map(enriquecerDemo));
+});
+
+app.get('/api/consultas/:id', async (_req, res) => {
+  const id = Number(_req.params.id);
+
+  if (mysqlReady) {
+    const linhas = await fetchFromDb(`${SELECT_CONSULTAS} WHERE c.id = ? LIMIT 1`, [id], []);
+    const consulta = Array.isArray(linhas) ? linhas[0] : null;
+    if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
+    return res.json(await comProcedimentos(comPaciente(consulta)));
+  }
+
+  const consulta = demoConsultas.find((item) => Number(item.id) === id);
+  if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
+  return res.json(enriquecerDemo(consulta));
+});
+
+// Procedimentos lançados numa consulta (o front usa este POST para adicionar).
+app.post('/api/procedimentos-consulta', async (req, res) => {
+  const { consulta_id, procedimento_id, dente, quantidade, valor_cobrado } = req.body || {};
+
+  const consultaId = Number(consulta_id);
+  const procedimentoId = Number(procedimento_id);
+  if (!Number.isInteger(consultaId) || !Number.isInteger(procedimentoId)) {
+    return res.status(400).json({ error: 'Consulta e procedimento são obrigatórios.' });
+  }
+
+  const registro = {
+    id: demoConsultaProcedimentos.length + 1,
+    consulta_id: consultaId,
+    procedimento_id: procedimentoId,
+    dente: dente ?? null,
+    quantidade: quantidade ?? 1,
+    valor_cobrado: valor_cobrado ?? 0,
+    status: 'pendente',
+    created_at: new Date().toISOString(),
+  };
+
+  if (mysqlReady) {
+    try {
+      await query(
+        `INSERT INTO consulta_procedimentos (consulta_id, procedimento_id, quantidade, valor_cobrado)
+         VALUES (?, ?, ?, ?)`,
+        [consultaId, procedimentoId, registro.quantidade, registro.valor_cobrado],
+      );
+      const [linha] = await query('SELECT * FROM consulta_procedimentos WHERE id = ? LIMIT 1', [registro.id]);
+      const procedimento = demoProcedimentos.find((p) => Number(p.id) === procedimentoId) ?? null;
+      return res.status(201).json({ ...(linha ?? registro), procedimento });
+    } catch (error) {
+      console.warn('[api:procedimentos-consulta] insert:', error.message);
+      return res.status(500).json({ error: 'Não foi possível lançar o procedimento.' });
+    }
+  }
+
+  demoConsultaProcedimentos.push(registro);
+  const procedimento = demoProcedimentos.find((p) => Number(p.id) === procedimentoId) ?? null;
+  return res.status(201).json({ ...registro, procedimento });
+});
+
 app.get('/api/dashboard', async (_req, res) => {
   if (mysqlReady) {
     const data = await fetchFromDb(
@@ -121,21 +288,6 @@ app.get('/api/dentistas', async (_req, res) => {
   return res.json(demoDentistas);
 });
 
-app.get('/api/consultas', async (_req, res) => {
-  const pacienteId = Number(_req.query.paciente_id || 0);
-  if (mysqlReady) {
-    const rows = await fetchFromDb(
-      pacienteId
-        ? 'SELECT * FROM consultas WHERE paciente_id = ? ORDER BY data_hora_inicio ASC'
-        : 'SELECT * FROM consultas ORDER BY data_hora_inicio ASC',
-      pacienteId ? [pacienteId] : [],
-      demoConsultas,
-    );
-    return res.json(rows);
-  }
-  const data = pacienteId ? demoConsultas.filter((item) => item.paciente_id === pacienteId) : demoConsultas;
-  return res.json(data);
-});
 
 app.get('/api/procedimentos', async (_req, res) => {
   if (mysqlReady) {
@@ -264,18 +416,6 @@ app.post('/api/usuarios/login', async (_req, res) => {
   return res.json({ user, token: 'demo-token' });
 });
 
-app.get('/api/consultas/:id', async (_req, res) => {
-  const id = Number(_req.params.id);
-  if (mysqlReady) {
-    const rows = await fetchFromDb('SELECT * FROM consultas WHERE id = ? LIMIT 1', [id], demoConsultas);
-    const consulta = Array.isArray(rows) ? rows[0] : null;
-    if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
-    return res.json(consulta);
-  }
-  const consulta = demoConsultas.find((item) => item.id === id);
-  if (!consulta) return res.status(404).json({ error: 'Consulta não encontrada' });
-  return res.json(consulta);
-});
 
 app.get('/api/dentistas/:id', async (_req, res) => {
   const id = Number(_req.params.id);
