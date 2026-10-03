@@ -6,6 +6,11 @@ import type { Usuario, PerfilSlug } from '../types';
 
 const SESSION_KEY = 'odonto-session';
 
+// Evento disparado pelas chamadas de API quando o servidor responde 401.
+// O AuthContext escuta e encerra a sessão, levando o usuário ao login em vez
+// de deixá-lo numa tela cheia de erros.
+export const EVENTO_NAO_AUTORIZADO = 'odonto:nao-autorizado';
+
 export const lerToken = (): string => {
   if (typeof window === 'undefined') return '';
   try {
@@ -88,6 +93,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       return null;
     }
+  }, []);
+
+  useEffect(() => {
+    // Qualquer 401 vindo da API encerra a sessão local.
+    const encerrar = () => {
+      apagarSessao();
+      setUser(null);
+    };
+    window.addEventListener(EVENTO_NAO_AUTORIZADO, encerrar);
+    return () => window.removeEventListener(EVENTO_NAO_AUTORIZADO, encerrar);
   }, []);
 
   useEffect(() => {

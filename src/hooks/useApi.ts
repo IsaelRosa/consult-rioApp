@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { lerToken } from '../contexts/AuthContext';
+import { lerToken, EVENTO_NAO_AUTORIZADO } from '../contexts/AuthContext';
 
 const rawBaseUrl = (import.meta.env.VITE_API_URL || '').trim();
 
@@ -86,6 +86,9 @@ export function useApi<T>(url: string | null, deps: unknown[] = []): UseApiResul
       });
 
       if (!res.ok) {
+        if (res.status === 401 && !url.includes('/usuarios/login')) {
+          window.dispatchEvent(new Event(EVENTO_NAO_AUTORIZADO));
+        }
         const fallback = getFallbackData<T>(url);
         setData(fallback ?? undefined);
         if (!fallback) {
@@ -129,9 +132,10 @@ export async function apiFetch<T = unknown>(
     },
   });
 
-  // Sessão expirada: limpa o token para o AuthContext cair no login.
+  // Sessão expirada ou reiniciada no servidor: avisa o AuthContext para
+  // limpar a sessão e redirecionar ao login (evita uma avalanche de 401).
   if (res.status === 401 && !url.includes('/usuarios/login')) {
-    window.localStorage.removeItem('odonto-session');
+    window.dispatchEvent(new Event(EVENTO_NAO_AUTORIZADO));
   }
   if (!res.ok) {
     const text = await res.text();

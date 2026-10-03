@@ -6,11 +6,34 @@ import crypto from 'node:crypto';
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
 
-// Segredo usado para assinar o token. Em produção defina SESSION_SECRET no
-// painel; sem isso geramos um efêmero (tokens caem a cada reinício).
-const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-if (!process.env.SESSION_SECRET) {
-  console.warn('[auth] SESSION_SECRET não definido — sessões caem a cada reinício do processo.');
+// Segredo usado para assinar o token.
+//
+// Ordem de preferência:
+//  1. SESSION_SECRET do ambiente (recomendado);
+//  2. derivado das credenciais do banco — estável entre reinícios, já que o
+//     Hostinger reinicia o processo a cada deploy e um segredo aleatório
+//     derrubaria todas as sessões;
+//  3. aleatório — último recurso, só funciona enquanto o processo viver.
+const segredoDoAmbiente = process.env.SESSION_SECRET?.trim();
+
+const segredoDerivadoDoBanco = (() => {
+  const { DB_HOST, DB_NAME, DB_USER, DB_PASSWORD } = process.env;
+  if (!DB_PASSWORD) return '';
+  return crypto
+    .createHash('sha256')
+    .update(`odontoclinic:${DB_HOST}:${DB_NAME}:${DB_USER}:${DB_PASSWORD}`)
+    .digest('hex');
+})();
+
+const SECRET = segredoDoAmbiente || segredoDerivadoDoBanco || crypto.randomBytes(32).toString('hex');
+
+if (segredoDoAmbiente) {
+  console.log('[auth] SESSION_SECRET definido.');
+} else if (segredoDerivadoDoBanco) {
+  console.log('[auth] SESSION_SECRET ausente — usando segredo derivado do banco (estável).');
+} else {
+  console.warn('[auth] ATENÇÃO: sem SESSION_SECRET e sem DB_PASSWORD. O segredo é aleatório:');
+  console.warn('[auth] as sessões serão invalidadas a cada reinício do processo. Defina SESSION_SECRET.');
 }
 
 // ---------- Senhas ----------
