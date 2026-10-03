@@ -225,7 +225,10 @@ CREATE TABLE IF NOT EXISTS auditoria (
   CONSTRAINT fk_auditoria_clinica FOREIGN KEY (clinica_id) REFERENCES clinicas(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Recuperação de senha: guarda apenas o SHA-256 do token
+-- Recuperação de senha: guarda apenas o SHA-256 do token.
+-- Sem ENGINE/CHARSET: herda o padrão do banco, como todas as outras tabelas
+-- deste arquivo. Fixar utf8mb4 aqui quebraria a FK para usuarios(id CHAR(36))
+-- em bancos criados fora deste script (erro 150).
 CREATE TABLE IF NOT EXISTS tokens_recuperacao (
   id INT PRIMARY KEY AUTO_INCREMENT,
   usuario_id CHAR(36) NOT NULL,
@@ -237,7 +240,7 @@ CREATE TABLE IF NOT EXISTS tokens_recuperacao (
   UNIQUE KEY uq_token_hash (token_hash),
   INDEX idx_recuperacao_usuario (usuario_id),
   CONSTRAINT fk_recuperacao_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+);
 
 INSERT INTO clinicas (id, nome, slug, plano, ativo)
 VALUES (1, 'Clínica Principal', 'clinica-principal', 'essencial', TRUE)

@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS auditoria (
 -- 3. Recuperação de senha
 --    Guarda apenas o SHA-256 do token: se o banco vazar, os tokens não são
 --    recuperáveis por quem leu a tabela.
+--
+--    Sem ENGINE/CHARSET de propósito: a tabela herda o charset padrão do banco,
+--    igual à `usuarios` já existente. Se declarássemos utf8mb4 aqui, a FK
+--    para usuarios(id CHAR(36) latin1) seria rejeitada com erro 150 —
+--    o MySQL exige charset idêntico entre coluna referenciada e referenciante.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tokens_recuperacao (
   id INT PRIMARY KEY AUTO_INCREMENT,
@@ -64,7 +69,7 @@ CREATE TABLE IF NOT EXISTS tokens_recuperacao (
   UNIQUE KEY uq_token_hash (token_hash),
   INDEX idx_recuperacao_usuario (usuario_id),
   CONSTRAINT fk_recuperacao_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+);
 
 -- ---------------------------------------------------------------------------
 -- 4. clinica_id em cada tabela de negócio
